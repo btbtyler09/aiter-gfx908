@@ -1,4 +1,4 @@
-FROM btbtyler09/vllm-dev-mi100:2026.02.07
+FROM btbtyler09/vllm-dev-mi100:2026.04.18
 
 WORKDIR /workspace/aiter
 
