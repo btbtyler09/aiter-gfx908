@@ -412,6 +412,7 @@ def validate_and_update_archs():
     # List of allowed architectures
     allowed_archs = [
         "native",
+        "gfx908",  # MI100 support
         "gfx90a",
         "gfx940",
         "gfx941",

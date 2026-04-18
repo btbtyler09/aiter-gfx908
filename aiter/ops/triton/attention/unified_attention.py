@@ -2,6 +2,8 @@
 # https://github.com/vllm-project/vllm/blob/main/vllm/attention/ops/triton_unified_attention.py
 import triton
 import torch
+import os
+import logging
 from aiter.ops.triton.utils.device_info import get_num_sms
 import math
 from aiter.ops.triton._triton_kernels.attention.unified_attention import (
@@ -192,6 +194,12 @@ def unified_attention(
         assert config["BLOCK_Q"] >= 1
         total_num_q_blocks = q.shape[0] // config["BLOCK_Q"] + num_seqs
 
+        if _UA_DEBUG and _UA_DEBUG_COUNT <= _UA_DEBUG_MAX:
+            _ua_logger.warning(
+                f"[UA_DEBUG] -> 2D kernel: config={config} "
+                f"grid=({num_kv_heads}, {total_num_q_blocks})"
+            )
+
         kernel_unified_attention_2d[
             (
                 num_kv_heads,
@@ -253,6 +261,13 @@ def unified_attention(
             num_2d_prgms,
         )
         NUM_SEGMENTS = attn_config["NUM_SEGMENTS_PER_SEQ"]
+
+        if _UA_DEBUG and _UA_DEBUG_COUNT <= _UA_DEBUG_MAX:
+            _ua_logger.warning(
+                f"[UA_DEBUG] -> 3D kernel: attn_config={attn_config} "
+                f"reduce_config={reduce_config} "
+                f"grid=({total_num_q_blocks}, {num_kv_heads}, {NUM_SEGMENTS})"
+            )
         segm_output = torch.empty(
             q.shape[0],
             num_query_heads,

@@ -1,0 +1,15 @@
+venv_mi100/
+.git/
+mi100_dev/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.log
+debug/
+aiter_logs/
+aiter_meta/
+# Pre-compiled .so files from host (wrong ROCm version)
+# JIT will recompile these inside the container
+aiter/jit/*.so

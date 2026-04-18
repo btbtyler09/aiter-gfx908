@@ -566,6 +566,18 @@ def get_ksplit(token, topk, expert, inter_dim, model_dim):
 cfg_2stages = None
 # fmt: off
 fused_moe_1stage_dict = {
+    "gfx908":
+    {
+        # activation,                    quant_type,        dtype,    q_dtype_a,    q_dtype_w,   isG1U1,    doweight_stage1,      API
+        # MI100 (gfx908) support - BF16/FP16/INT8 only (no FP8/FP4 on CDNA1)
+        (ActivationType.Silu,          QuantType.No,  dtypes.bf16,   dtypes.bf16,   dtypes.bf16,   False,   False) : aiter.fmoe,
+        (ActivationType.Silu,          QuantType.No,  dtypes.fp16,   dtypes.fp16,   dtypes.fp16,   False,   False) : aiter.fmoe,
+        (ActivationType.Gelu,          QuantType.No,  dtypes.bf16,   dtypes.bf16,   dtypes.bf16,   False,   False) : aiter.fmoe,
+        (ActivationType.Gelu,          QuantType.No,  dtypes.fp16,   dtypes.fp16,   dtypes.fp16,   False,   False) : aiter.fmoe,
+        # INT8 quantization - CDNA1 has INT8 MFMA (32x32x8)
+        (ActivationType.Silu,   QuantType.per_Token,  dtypes.bf16,     dtypes.i8,     dtypes.i8,   False,   False) : aiter.fmoe_int8_g1u0,
+        (ActivationType.Gelu,   QuantType.per_Token,  dtypes.bf16,     dtypes.i8,     dtypes.i8,   False,   False) : aiter.fmoe_int8_g1u0,
+    },
     "gfx942":
     {
         # activation,                    quant_type,        dtype,    q_dtype_a,    q_dtype_w,   isG1U1,    doweight_stage1,      API

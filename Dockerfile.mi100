@@ -1,0 +1,24 @@
+FROM btbtyler09/vllm-dev-mi100:2026.02.07
+
+WORKDIR /workspace/aiter
+
+# Copy entire repo (respecting .dockerignore)
+COPY . .
+
+# Install AITER in editable mode with JIT compilation
+# PREBUILD_KERNELS=0 means CK kernels compile on first use (JIT)
+# GPU_ARCHS=gfx908 targets MI100 specifically
+ENV GPU_ARCHS=gfx908
+ENV PREBUILD_KERNELS=0
+ENV MAX_JOBS=8
+
+RUN pip install -e . 2>&1 | tee /workspace/aiter_build.log
+
+# Copy test script into repo root (where Python path works correctly)
+COPY run_mi100_tests.sh /workspace/aiter/run_mi100_tests.sh
+RUN chmod +x /workspace/aiter/run_mi100_tests.sh
+
+# IMPORTANT: WORKDIR must be the repo root (/workspace/aiter) so that
+# `import aiter` finds ./aiter/__init__.py correctly. Running from
+# /workspace would cause Python to treat /workspace/aiter/ as a namespace
+# package (no __init__.py at repo root), breaking all imports.
