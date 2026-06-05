@@ -1610,6 +1610,7 @@ class OpusGemmA16W16Tuner(GemmCommonTuner):
                     "a16w16_fused_reduce",
                     "a16w16_kbuf2v_sk",
                     "a16w16_kbuf2v_bk128_sk",
+                    "a16w16_em3en4_lds1_pgr2_sk",
                 )
                 _need = _OUT_TORCH_TO_CTYPE.get(out_dtype)
                 if (
@@ -1627,6 +1628,7 @@ class OpusGemmA16W16Tuner(GemmCommonTuner):
                     "a16w16_fused_reduce",
                     "a16w16_kbuf2v_sk",
                     "a16w16_kbuf2v_bk128_sk",
+                    "a16w16_em3en4_lds1_pgr2_sk",
                 ):
                     splitK_range = candidate_splitK(M, N, K, batch, cu_num, k_inst)
                 else:
