@@ -819,6 +819,9 @@ def block_attn_mask_to_ragged_lut_sorted(
     # Sort each row by score descending; unattended blocks get -inf so they sort
     # past the per-row count and are dropped. force_front blocks get +inf so they
     # lead the segment regardless of score (e.g. always-attended text blocks).
+    # stable=True keeps tied scores in ascending block-index order -- important for
+    # rows whose blocks are unscored (e.g. text query rows where image columns are
+    # -inf), so the frozen-max warm window is deterministic rather than arbitrary.
     neg_inf = pooled_score.new_full((), float("-inf"))
     masked_score = torch.where(attended, pooled_score.to(torch.float32), neg_inf)
     if force_front_mask is not None:
@@ -826,7 +829,9 @@ def block_attn_mask_to_ragged_lut_sorted(
         masked_score = torch.where(
             force_front, masked_score.new_full((), float("inf")), masked_score
         )
-    order = torch.argsort(masked_score, dim=-1, descending=True).to(torch.int32)
+    order = torch.argsort(masked_score, dim=-1, descending=True, stable=True).to(
+        torch.int32
+    )
     rows = order.reshape(B * H * Q, K)
 
     # Pack via a static-shape scatter: the first ``count`` (descending-score)
