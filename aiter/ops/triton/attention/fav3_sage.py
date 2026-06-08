@@ -749,6 +749,7 @@ def block_attn_mask_to_ragged_lut_sorted(
     block_attn_mask: torch.Tensor,
     pooled_score: torch.Tensor,
     num_heads: Optional[int] = None,
+    force_front_mask: Optional[torch.Tensor] = None,
     return_none_if_dense: bool = False,
 ) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """Build a ragged LUT with attended K blocks emitted in descending score order.
@@ -762,7 +763,8 @@ def block_attn_mask_to_ragged_lut_sorted(
     This pairs with the ``freeze_softmax_max_count`` block-sparse path
     (:func:`fav3_sage_func`): the online-softmax running max is frozen after the
     first few inner-loop iterations, so visiting the highest-scoring (and thus
-    likely highest-max) tiles first makes the frozen max a tight estimate.
+    likely highest-max) tiles -- plus any always-attended ``force_front_mask``
+    tiles -- first makes the frozen max a tight estimate.
 
     The LUT is packed with a static-shape scatter into an over-allocated buffer
     (no boolean-mask indexing or ``.sum().item()``), so the whole function keeps a
@@ -775,8 +777,12 @@ def block_attn_mask_to_ragged_lut_sorted(
         pooled_score: fp32 ``(B, H, num_q_blocks, num_k_blocks)`` block-level
             attention score (e.g. from :func:`get_block_map_meansim`). Only blocks
             attended in ``block_attn_mask`` are emitted; the score determines their
-            order. Use ``+inf`` for blocks that must lead the segment.
+            order.
         num_heads: number of Q heads; required when ``block_attn_mask`` is 3D.
+        force_front_mask: optional bool mask, same shape/broadcast as
+            ``block_attn_mask``, of blocks to place at the front of each segment
+            (e.g. always-attended text blocks). Only the attended ones are
+            emitted; they lead ahead of the score-sorted blocks.
         return_none_if_dense: If True and the mask is all True (dense), return None
             so the caller can take the dense path instead of building a large LUT.
 
@@ -795,6 +801,8 @@ def block_attn_mask_to_ragged_lut_sorted(
         if return_none_if_dense and block_attn_mask.all():
             return None
         block_attn_mask = block_attn_mask.unsqueeze(1).expand(B, num_heads, Q, K)
+        if force_front_mask is not None and force_front_mask.dim() == 3:
+            force_front_mask = force_front_mask.unsqueeze(1).expand(B, num_heads, Q, K)
 
     B, H, Q, K = block_attn_mask.shape
     if return_none_if_dense and block_attn_mask.all():
@@ -809,9 +817,15 @@ def block_attn_mask_to_ragged_lut_sorted(
     lut_start = torch.cumsum(lut_count, 0) - lut_count
 
     # Sort each row by score descending; unattended blocks get -inf so they sort
-    # past the per-row count and are dropped.
+    # past the per-row count and are dropped. force_front blocks get +inf so they
+    # lead the segment regardless of score (e.g. always-attended text blocks).
     neg_inf = pooled_score.new_full((), float("-inf"))
     masked_score = torch.where(attended, pooled_score.to(torch.float32), neg_inf)
+    if force_front_mask is not None:
+        force_front = force_front_mask.to(torch.bool).expand(B, H, Q, K) & attended
+        masked_score = torch.where(
+            force_front, masked_score.new_full((), float("inf")), masked_score
+        )
     order = torch.argsort(masked_score, dim=-1, descending=True).to(torch.int32)
     rows = order.reshape(B * H * Q, K)
 
@@ -924,17 +938,22 @@ def build_attention_lut(
         return block_attn_mask_to_ragged_lut(full_mask), -1
 
     # vfa / both: emit blocks in descending pooled-score order so the highest-max
-    # tiles lead each segment. Scores live only over the image region; the dense
-    # text K cols get +inf so they always sort to the very front (always attended,
-    # and counted in the freeze window), while text-row image positions stay -inf.
+    # tiles lead each segment. Scores live only over the image region; text/
+    # text-row positions stay -inf, and the dense text K cols are forced to the
+    # front via force_front_mask (always attended, counted in the freeze window).
     B, H, n_iq, n_ik = image_mask.shape
     n_tq, n_tk = full_mask.shape[-2], full_mask.shape[-1]
     full_score = full_mask.new_full(
         (B, H, n_tq, n_tk), float("-inf"), dtype=torch.float32
     )
     full_score[:, :, :n_iq, :n_ik] = image_score.to(torch.float32)
-    if n_text_k > 0:
-        full_score[:, :, :, -n_text_k:] = float("inf")
 
-    block_lut = block_attn_mask_to_ragged_lut_sorted(full_mask, full_score)
+    force_front = None
+    if n_text_k > 0:
+        force_front = torch.zeros((B, H, n_tq, n_tk), dtype=torch.bool, device=q.device)
+        force_front[:, :, :, -n_text_k:] = True
+
+    block_lut = block_attn_mask_to_ragged_lut_sorted(
+        full_mask, full_score, force_front_mask=force_front
+    )
     return block_lut, n_sample + n_text_k
