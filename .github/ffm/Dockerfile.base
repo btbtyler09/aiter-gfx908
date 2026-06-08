@@ -1,0 +1,42 @@
+# Base bring-up image for the FFM GitHub Actions workflow.
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential clang ninja-build cmake git curl wget rsync ssh \
+    ca-certificates python3-pip python3-dev less vim lld ccache sudo \
+    numactl libelf1 libzstd-dev && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
+
+RUN pip config set global.break-system-packages true
+
+RUN pip install --upgrade --ignore-installed pip PyYAML setuptools wheel && \
+    pip install cmake ninja nanobind numpy scipy pandas matplotlib einops \
+    pytest pytest-xdist pytest-repeat lit expecttest \
+    pylama pre-commit clang-format requests Jinja2
+
+RUN pip install --no-cache-dir typing_extensions sympy networkx jinja2 fsspec
+
+RUN pip install --index-url https://rocm.genesis.amd.com/whl/gfx1250/ --no-cache-dir \
+    torch torchaudio torchvision rocm-sdk-core rocm-sdk-devel
+
+RUN export ROCM_PATH="$(pip show torch | grep ^Location: | cut -d' ' -f2-)/_rocm_sdk_core" && \
+    cd ${ROCM_PATH}/lib && \
+    ln -sf libamdhip64.so.7 libamdhip64.so && \
+    mkdir -p /opt/rocm && \
+    ln -sf ${ROCM_PATH}/lib /opt/rocm/lib
+
+RUN pip install --no-cache-dir --upgrade hip-python -i https://test.pypi.org/simple/
+
+RUN pip uninstall -y triton pytorch-triton pytorch-triton-rocm || true
+
+RUN ccache --max-size=15G
+
+RUN echo "export PATH=/root/.local/bin:/opt/rocm/bin:\$PATH" >> /root/.bashrc
+ENV PATH="/root/.local/bin:/opt/rocm/bin:${PATH}"
+ENV LD_LIBRARY_PATH="/opt/rocm/lib"
+ENV LIBRARY_PATH="/opt/rocm/lib"
+
+WORKDIR /root

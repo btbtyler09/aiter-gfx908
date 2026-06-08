@@ -1,0 +1,304 @@
+name: FFM Bringup
+
+run-name: FFM ${{ inputs.ffm_source }} ${{ inputs.ffm_build_num_dir || 'latest' }} / aiter ${{ inputs.aiter_ref || github.sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Self-hosted GPU runner label with Docker, /dev/kfd, /dev/dri, and access to AMD internal networks.
+        required: true
+        default: linux-aiter-mi35x-1
+        type: string
+      push_image:
+        description: Push rocm/ffm-dev:<resolved-version> and rocm/ffm-dev:latest after tests pass.
+        required: true
+        default: false
+        type: boolean
+      ffm_source:
+        description: dev = FFM master package, release = FFM-Lite release package.
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - release
+      install_llvm:
+        description: Build AMD-Lightning-Internal LLVM and build Triton against it.
+        required: true
+        default: "yes"
+        type: choice
+        options:
+          - "yes"
+          - "no"
+      llvm_ref:
+        description: AMD-Lightning-Internal/llvm-project branch, tag, or SHA.
+        required: true
+        default: amd/dev/jebyrnes/PipelinedSchedulerTriton7
+        type: string
+      triton_ref:
+        description: AMD-Triton/triton-mi450 branch, tag, or SHA.
+        required: true
+        default: shared/AIDayStaging
+        type: string
+      aiter_ref:
+        description: ROCm/aiter branch, tag, or SHA. Blank uses the workflow commit SHA.
+        required: false
+        default: ""
+        type: string
+      ffm_build_num_dir:
+        description: FFM dev build dir, for example 20260527.195754. Blank resolves the latest Artifactory build.
+        required: false
+        default: ""
+        type: string
+      ffm_package:
+        description: FFM package filename. Blank uses ubuntu_24_04_rel.tar.gz for dev or the latest release tarball.
+        required: false
+        default: ""
+        type: string
+      run_aiter_ut:
+        description: Run the aiter GEMM FFM unit test before allowing image push.
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.ffm_source }}-${{ inputs.ffm_build_num_dir || 'latest' }}
+  cancel-in-progress: false
+
+env:
+  ART_BASE: https://atlartifactory.amd.com:8443/artifactory
+  ART_HOST: atlartifactory.amd.com
+  BASE_IMAGE: bringup-base:${{ github.run_id }}
+  FFM_IMAGE: ffm-bringup:${{ github.run_id }}
+  FFM_PUSH_REPO: rocm/ffm-dev
+  AITER_REPO: git@github.com:${{ github.repository }}.git
+  AITER_REF: ${{ inputs.aiter_ref || github.sha }}
+
+jobs:
+  ffm:
+    name: Build, Test, and Optionally Push FFM
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout workflow files
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+
+      - name: Validate parameters and secrets
+        env:
+          ART_USER: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ART_PASS: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          AMD_SSH_KEY: ${{ secrets.AMD_GITHUB_SSH_KEY }}
+          ROCM_SSH_KEY: ${{ secrets.ROCM_GITHUB_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${ART_USER}" ] || [ -z "${ART_PASS}" ]; then
+            echo "::error::Missing ARTIFACTORY_USERNAME or ARTIFACTORY_PASSWORD secret"
+            exit 1
+          fi
+          if [ -z "${AMD_SSH_KEY}" ]; then
+            echo "::error::Missing AMD_GITHUB_SSH_KEY secret"
+            exit 1
+          fi
+          if [ -z "${ROCM_SSH_KEY}" ]; then
+            echo "::error::Missing ROCM_GITHUB_SSH_KEY secret"
+            exit 1
+          fi
+
+      - name: Prepare temporary credentials
+        id: creds
+        env:
+          ART_USER: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ART_PASS: ${{ secrets.ARTIFACTORY_PASSWORD }}
+          AMD_SSH_KEY: ${{ secrets.AMD_GITHUB_SSH_KEY }}
+          ROCM_SSH_KEY: ${{ secrets.ROCM_GITHUB_SSH_KEY }}
+        run: |
+          set -euo pipefail
+
+          NETRC="${GITHUB_WORKSPACE}/.artifactory-netrc-${GITHUB_RUN_ID}-ffm"
+          AMD_KEY_FILE="${RUNNER_TEMP}/amd-github-key-${GITHUB_RUN_ID}"
+          ROCM_KEY_FILE="${RUNNER_TEMP}/rocm-github-key-${GITHUB_RUN_ID}"
+
+          umask 077
+          printf 'machine %s login %s password %s\n' "${ART_HOST}" "${ART_USER}" "${ART_PASS}" > "${NETRC}"
+          printf '%s\n' "${AMD_SSH_KEY}" > "${AMD_KEY_FILE}"
+          printf '%s\n' "${ROCM_SSH_KEY}" > "${ROCM_KEY_FILE}"
+
+          echo "netrc=${NETRC}" >> "${GITHUB_OUTPUT}"
+          echo "amd_key=${AMD_KEY_FILE}" >> "${GITHUB_OUTPUT}"
+          echo "rocm_key=${ROCM_KEY_FILE}" >> "${GITHUB_OUTPUT}"
+
+      - name: Resolve FFM package
+        id: ffm
+        env:
+          NETRC: ${{ steps.creds.outputs.netrc }}
+          FFM_SOURCE: ${{ inputs.ffm_source }}
+          FFM_BUILD_NUM_DIR: ${{ inputs.ffm_build_num_dir }}
+          FFM_PACKAGE_INPUT: ${{ inputs.ffm_package }}
+        run: |
+          set -euo pipefail
+
+          if [ "${FFM_SOURCE}" = "dev" ]; then
+            MASTER="gfxip-mi400-dev-local/gfxip/mi400/main/jitcu/mi450/master"
+            BNUM="${FFM_BUILD_NUM_DIR}"
+            if [ -z "${BNUM}" ]; then
+              BNUM="$(
+                curl -fsS --netrc-file "${NETRC}" "${ART_BASE}/api/storage/${MASTER}/" |
+                python3 -c "import sys,json,re; d=json.load(sys.stdin); v=sorted(c['uri'].strip('/') for c in d['children'] if c['folder'] and re.fullmatch(r'[0-9]{8}[.][0-9]{6}', c['uri'].strip('/'))); print(v[-1] if v else '')"
+              )"
+            fi
+            if [ -z "${BNUM}" ]; then
+              echo "::error::Could not resolve FFM dev build number"
+              exit 1
+            fi
+            PKG="${FFM_PACKAGE_INPUT:-ubuntu_24_04_rel.tar.gz}"
+            FFM_URL="${ART_BASE}/${MASTER}/${BNUM}/${PKG}"
+            FFM_VER="${BNUM}"
+          else
+            RELEASE="SW-ROCDTIF-MI-DEV-LOCAL/Packages/FFM-Lite/Release"
+            PKG="${FFM_PACKAGE_INPUT}"
+            if [ -z "${PKG}" ]; then
+              PKG="$(
+                curl -fsS --netrc-file "${NETRC}" "${ART_BASE}/api/storage/${RELEASE}/" |
+                python3 -c "import sys,json,re; d=json.load(sys.stdin); f=[c['uri'].strip('/') for c in d['children'] if not c['folder'] and c['uri'].endswith('.tar.gz')]; f.sort(key=lambda x:((re.findall(r'rel-([0-9]{8})',x) or ['0'])[-1], x)); print(f[-1] if f else '')"
+              )"
+            fi
+            if [ -z "${PKG}" ]; then
+              echo "::error::Could not resolve FFM release package"
+              exit 1
+            fi
+            FFM_URL="${ART_BASE}/${RELEASE}/${PKG}"
+            FFM_VER="${PKG%.tar.gz}"
+          fi
+
+          FFM_VER="$(printf '%s' "${FFM_VER}" | tr -c 'A-Za-z0-9_.-' '-')"
+          FFM_TAG="ffm-${FFM_SOURCE}-${FFM_VER}"
+          printf '%s\n' "${FFM_VER}" > "${GITHUB_WORKSPACE}/.ffm-version-${GITHUB_RUN_ID}"
+
+          echo "ffm_url=${FFM_URL}" >> "${GITHUB_OUTPUT}"
+          echo "ffm_package=${PKG}" >> "${GITHUB_OUTPUT}"
+          echo "ffm_version=${FFM_VER}" >> "${GITHUB_OUTPUT}"
+          echo "ffm_tag=${FFM_TAG}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "### FFM package"
+            echo "- Source: \`${FFM_SOURCE}\`"
+            echo "- Package: \`${PKG}\`"
+            echo "- Version: \`${FFM_VER}\`"
+            echo "- Docker tag: \`${FFM_PUSH_REPO}:${FFM_TAG}\`"
+            echo "- Aiter ref: \`${AITER_REF}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Build base image
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            -f .github/ffm/Dockerfile.base \
+            -t "${BASE_IMAGE}" \
+            .github/ffm/
+
+      - name: Build FFM image
+        env:
+          NETRC: ${{ steps.creds.outputs.netrc }}
+          AMD_KEY_FILE: ${{ steps.creds.outputs.amd_key }}
+          ROCM_KEY_FILE: ${{ steps.creds.outputs.rocm_key }}
+        run: |
+          set -euo pipefail
+          DOCKER_BUILDKIT=1 docker build \
+            -f .github/ffm/Dockerfile.ffm \
+            --secret id=netrc,src="${NETRC}" \
+            --ssh amd="${AMD_KEY_FILE}" \
+            --ssh rocm="${ROCM_KEY_FILE}" \
+            --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+            --build-arg FFM_URL="${{ steps.ffm.outputs.ffm_url }}" \
+            --build-arg FFM_PACKAGE="${{ steps.ffm.outputs.ffm_package }}" \
+            --build-arg FFM_SOURCE="${{ inputs.ffm_source }}" \
+            --build-arg INSTALL_LLVM="${{ inputs.install_llvm }}" \
+            --build-arg LLVM_REF="${{ inputs.llvm_ref }}" \
+            --build-arg TRITON_REF="${{ inputs.triton_ref }}" \
+            --build-arg AITER_REPO="${AITER_REPO}" \
+            --build-arg AITER_REF="${AITER_REF}" \
+            -t "${FFM_IMAGE}" \
+            .github/ffm/
+
+      - name: Run aiter FFM unit test
+        if: ${{ inputs.run_aiter_ut }}
+        run: |
+          set -euo pipefail
+
+          DEVICE_FLAG="--device /dev/dri"
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices)"
+          fi
+
+          GROUP_FLAGS=""
+          for group in video render; do
+            gid="$(getent group "${group}" | cut -d: -f3 || true)"
+            if [ -n "${gid}" ]; then
+              GROUP_FLAGS="${GROUP_FLAGS} --group-add ${gid}"
+            fi
+          done
+
+          echo "Running aiter unit tests in ${FFM_IMAGE}"
+          docker run --rm \
+            --device /dev/kfd ${DEVICE_FLAG} \
+            ${GROUP_FLAGS} \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            --shm-size=16gb \
+            "${FFM_IMAGE}" \
+            bash -c '
+              set -e
+              source /ffm/ffmlite_env.sh
+              cd /root/aiter
+              python3 -m pytest -v op_tests/triton_tests/gemm/basic/test_gemm_a16w16.py
+            '
+
+      - name: Push FFM image
+        if: ${{ inputs.push_image }}
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          FFM_TAG: ${{ steps.ffm.outputs.ffm_tag }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${DOCKER_PASSWORD}" ]; then
+            echo "::error::Missing DOCKER_PASSWORD secret"
+            exit 1
+          fi
+          DOCKER_USER="${DOCKERHUB_USERNAME:-rocmshared}"
+
+          export DOCKER_CONFIG="${GITHUB_WORKSPACE}/.docker-ffm-${GITHUB_RUN_ID}"
+          mkdir -p "${DOCKER_CONFIG}"
+
+          echo "${DOCKER_PASSWORD}" | docker login -u "${DOCKER_USER}" --password-stdin
+          docker tag "${FFM_IMAGE}" "${FFM_PUSH_REPO}:${FFM_TAG}"
+          docker tag "${FFM_IMAGE}" "${FFM_PUSH_REPO}:latest"
+          docker push "${FFM_PUSH_REPO}:${FFM_TAG}"
+          docker push "${FFM_PUSH_REPO}:latest"
+          docker rmi "${FFM_PUSH_REPO}:${FFM_TAG}" 2>/dev/null || true
+          docker rmi "${FFM_PUSH_REPO}:latest" 2>/dev/null || true
+          docker logout || true
+
+          echo "Pushed ${FFM_PUSH_REPO}:${FFM_TAG} and ${FFM_PUSH_REPO}:latest" >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f "${GITHUB_WORKSPACE}/.artifactory-netrc-${GITHUB_RUN_ID}"* \
+                "${GITHUB_WORKSPACE}/.ffm-version-${GITHUB_RUN_ID}" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/amd-github-key-${GITHUB_RUN_ID}" \
+                "${RUNNER_TEMP}/rocm-github-key-${GITHUB_RUN_ID}" 2>/dev/null || true
+          rm -rf "${GITHUB_WORKSPACE}/.docker-ffm-${GITHUB_RUN_ID}" 2>/dev/null || true
+          docker logout 2>/dev/null || true
+          docker rmi "${FFM_IMAGE}" 2>/dev/null || true
+          docker rmi "${BASE_IMAGE}" 2>/dev/null || true

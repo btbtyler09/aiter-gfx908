@@ -1,0 +1,72 @@
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG FFM_URL
+ARG FFM_PACKAGE
+ARG FFM_SOURCE=dev
+ARG INSTALL_LLVM=yes
+ARG LLVM_REF=amd/dev/jebyrnes/PipelinedSchedulerTriton7
+ARG TRITON_REF=shared/AIDayStaging
+ARG AITER_REPO=git@github.com:ROCm/aiter.git
+ARG AITER_REF=main
+
+COPY --chmod=755 build_llvm_triton.sh /root/build_llvm_triton.sh
+
+RUN --mount=type=secret,id=netrc,target=/root/.netrc set -eux; \
+    export HOME=/root; \
+    mkdir -p /ffm; cd /ffm; \
+    wget "${FFM_URL}"; \
+    test -s "${FFM_PACKAGE}"; \
+    tar -xf "${FFM_PACKAGE}"; \
+    pip install PyYAML; \
+    if [ "${FFM_SOURCE}" = "dev" ]; then \
+        [ -d lib ] || mkdir -p lib; \
+        if [ -f libhsakmtmodel.so ]; then mv libhsakmtmodel.so lib/; fi; \
+    fi
+
+COPY --chmod=755 ffmlite_env.sh /ffm/ffmlite_env.sh
+RUN grep -q "ffmlite_env.sh" /root/.bashrc \
+    || echo "source /ffm/ffmlite_env.sh" >> /root/.bashrc
+
+RUN --mount=type=ssh,id=amd set -eux; \
+    if [ "${INSTALL_LLVM}" = "yes" ]; then \
+        mkdir -p ~/.ssh; chmod 700 ~/.ssh; \
+        ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true; \
+        cd /root; \
+        git clone git@github.com:AMD-Lightning-Internal/llvm-project.git llvm-project; \
+        cd /root/llvm-project; \
+        git checkout "${LLVM_REF}"; \
+    else \
+        echo "INSTALL_LLVM=no - skipping llvm-project clone"; \
+    fi
+
+RUN --mount=type=ssh,id=amd set -eux; \
+    mkdir -p ~/.ssh; chmod 700 ~/.ssh; \
+    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true; \
+    cd /root; \
+    git clone git@github.com:AMD-Triton/triton-mi450.git triton; \
+    cd /root/triton; \
+    git checkout "${TRITON_REF}"; \
+    pip install -r python/requirements.txt; \
+    pip install -U nanobind numpy scipy pandas matplotlib einops pytest pytest-xdist pytest-repeat expecttest pylama pre-commit clang-format; \
+    if [ "${INSTALL_LLVM}" = "yes" ]; then \
+        bash /root/build_llvm_triton.sh; \
+    else \
+        pip install -e .; \
+    fi
+
+ENV AITER_USE_SYSTEM_TRITON=1
+
+RUN --mount=type=ssh,id=rocm set -eux; \
+    mkdir -p ~/.ssh; chmod 700 ~/.ssh; \
+    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true; \
+    cd /root; \
+    git clone --recursive "${AITER_REPO}" aiter; \
+    cd /root/aiter; \
+    git checkout "${AITER_REF}"; \
+    git submodule update --init --recursive; \
+    pip install -r requirements.txt; \
+    pip install -e . --no-build-isolation
+
+WORKDIR /root
