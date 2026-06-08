@@ -1511,11 +1511,11 @@ def build_topids_to_rows(
 
 
 @functools.cache
-def _get_compiled_route_maps():
+def _get_compiled_route_maps(input_i64: bool = False):
     """Compile and cache the atomic route -> grouped-row map kernel."""
     from aiter.ops.flydsl.kernels.moe_route_maps import build_moe_route_maps_module
 
-    return build_moe_route_maps_module()
+    return build_moe_route_maps_module(input_i64=input_i64)
 
 
 def build_route_maps(topk_ids: torch.Tensor, E: int, max_m: int):
@@ -1540,26 +1540,33 @@ def build_route_maps(topk_ids: torch.Tensor, E: int, max_m: int):
     expert is atomic-race order (nondeterministic) but self-consistent -- both
     maps come from the same run, and the grouped GEMM is order-agnostic per
     expert.
+
+    Optional int64->int32 input truncation is handled inside the kernel.
     """
     device = topk_ids.device
     token_num, topk = topk_ids.shape
     numel = token_num * topk
-    topk_ids_i32 = topk_ids.reshape(-1).to(torch.int32).contiguous()
-    # Per-expert counter starts at 0; the kernel applies the e*max_m offset, so
-    # after the run this buffer holds counts[e] directly == masked_m.
+
+    input_i64 = topk_ids.dtype in (torch.int64, torch.long)
+    topk_ids_flat = topk_ids.reshape(-1)
+
+    total_rows = E * max_m
     atomic_buffer = torch.zeros(E, dtype=torch.int32, device=device)
     topids_to_rows = torch.empty(numel, dtype=torch.int32, device=device)
-    rows_to_tokens = torch.full((E * max_m,), -1, dtype=torch.int32, device=device)
-    grid_blocks = (numel + 255) // 256
-    launch = _get_compiled_route_maps()
+    rows_to_tokens = torch.empty(total_rows, dtype=torch.int32, device=device)
+
+    grid_blocks = (max(numel, total_rows) + 255) // 256
+
+    launch = _get_compiled_route_maps(input_i64=input_i64)
     launch(
-        topk_ids_i32,
+        topk_ids_flat,
         atomic_buffer,
         topids_to_rows,
         rows_to_tokens,
         numel,
         topk,
         max_m,
+        total_rows,
         grid_blocks,
         stream=torch.cuda.current_stream(),
     )
