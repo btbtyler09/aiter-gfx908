@@ -27,25 +27,22 @@ COPY --chmod=755 .github/ffm/ffmlite_env.sh /ffm/ffmlite_env.sh
 RUN grep -q "ffmlite_env.sh" /root/.bashrc \
     || echo "source /ffm/ffmlite_env.sh" >> /root/.bashrc
 
-RUN --mount=type=ssh,id=amd set -eux; \
+RUN --mount=type=secret,id=amd_lightning_token,target=/run/secrets/amd_lightning_token set -eu; \
     if [ "${INSTALL_LLVM}" = "yes" ]; then \
-        mkdir -p ~/.ssh; chmod 700 ~/.ssh; \
-        ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true; \
+        TOKEN="$(cat /run/secrets/amd_lightning_token)"; \
         cd /root; \
-        git clone git@github.com:AMD-Lightning-Internal/llvm-project.git llvm-project; \
-        cd /root/llvm-project; \
-        git checkout "${LLVM_REF}"; \
+        git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+            clone -b "${LLVM_REF}" https://github.com/AMD-Lightning-Internal/llvm-project.git llvm-project; \
     else \
         echo "INSTALL_LLVM=no - skipping llvm-project clone"; \
     fi
 
-RUN --mount=type=ssh,id=amd set -eux; \
-    mkdir -p ~/.ssh; chmod 700 ~/.ssh; \
-    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true; \
+RUN --mount=type=secret,id=amd_triton_token,target=/run/secrets/amd_triton_token set -eu; \
+    TOKEN="$(cat /run/secrets/amd_triton_token)"; \
     cd /root; \
-    git clone git@github.com:AMD-Triton/triton-mi450.git triton; \
+    git -c "http.https://github.com/.extraheader=AUTHORIZATION: bearer ${TOKEN}" \
+        clone -b "${TRITON_REF}" https://github.com/AMD-Triton/triton-mi450.git triton; \
     cd /root/triton; \
-    git checkout "${TRITON_REF}"; \
     pip install -r python/requirements.txt; \
     pip install -U nanobind numpy scipy pandas matplotlib einops pytest pytest-xdist pytest-repeat expecttest pylama pre-commit clang-format; \
     if [ "${INSTALL_LLVM}" = "yes" ]; then \

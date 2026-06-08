@@ -108,7 +108,8 @@ jobs:
         env:
           ART_USER: ${{ secrets.ARTIFACTORY_USERNAME }}
           ART_PASS: ${{ secrets.ARTIFACTORY_PASSWORD }}
-          AMD_SSH_KEY: ${{ secrets.AMD_GITHUB_SSH_KEY }}
+          AITER_CI_APP_ID: ${{ secrets.AITER_CI_APP_ID }}
+          AITER_CI_APP_PRIVATE_KEY: ${{ secrets.AITER_CI_APP_PRIVATE_KEY }}
         run: |
           set -euo pipefail
 
@@ -116,29 +117,43 @@ jobs:
             echo "::error::Missing ARTIFACTORY_USERNAME or ARTIFACTORY_PASSWORD secret"
             exit 1
           fi
-          if [ -z "${AMD_SSH_KEY}" ]; then
-            echo "::error::Missing AMD_GITHUB_SSH_KEY secret"
+          if [ -z "${AITER_CI_APP_ID}" ] || [ -z "${AITER_CI_APP_PRIVATE_KEY}" ]; then
+            echo "::error::Missing AITER_CI_APP_ID or AITER_CI_APP_PRIVATE_KEY secret"
             exit 1
           fi
+
+      - name: Generate AMD Lightning GitHub App token
+        id: amd_lightning_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AITER_CI_APP_ID }}
+          private-key: ${{ secrets.AITER_CI_APP_PRIVATE_KEY }}
+          owner: AMD-Lightning-Internal
+          repositories: llvm-project
+
+      - name: Generate AMD Triton GitHub App token
+        id: amd_triton_token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.AITER_CI_APP_ID }}
+          private-key: ${{ secrets.AITER_CI_APP_PRIVATE_KEY }}
+          owner: AMD-Triton
+          repositories: triton-mi450
 
       - name: Prepare temporary credentials
         id: creds
         env:
           ART_USER: ${{ secrets.ARTIFACTORY_USERNAME }}
           ART_PASS: ${{ secrets.ARTIFACTORY_PASSWORD }}
-          AMD_SSH_KEY: ${{ secrets.AMD_GITHUB_SSH_KEY }}
         run: |
           set -euo pipefail
 
           NETRC="${GITHUB_WORKSPACE}/.artifactory-netrc-${GITHUB_RUN_ID}-ffm"
-          AMD_KEY_FILE="${RUNNER_TEMP}/amd-github-key-${GITHUB_RUN_ID}"
 
           umask 077
           printf 'machine %s login %s password %s\n' "${ART_HOST}" "${ART_USER}" "${ART_PASS}" > "${NETRC}"
-          printf '%s\n' "${AMD_SSH_KEY}" > "${AMD_KEY_FILE}"
 
           echo "netrc=${NETRC}" >> "${GITHUB_OUTPUT}"
-          echo "amd_key=${AMD_KEY_FILE}" >> "${GITHUB_OUTPUT}"
 
       - name: Resolve FFM package
         id: ffm
@@ -209,13 +224,21 @@ jobs:
       - name: Build FFM image
         env:
           NETRC: ${{ steps.creds.outputs.netrc }}
-          AMD_KEY_FILE: ${{ steps.creds.outputs.amd_key }}
+          AMD_LIGHTNING_TOKEN: ${{ steps.amd_lightning_token.outputs.token }}
+          AMD_TRITON_TOKEN: ${{ steps.amd_triton_token.outputs.token }}
         run: |
           set -euo pipefail
+          AMD_LIGHTNING_TOKEN_FILE="${RUNNER_TEMP}/amd-lightning-token-${GITHUB_RUN_ID}"
+          AMD_TRITON_TOKEN_FILE="${RUNNER_TEMP}/amd-triton-token-${GITHUB_RUN_ID}"
+          umask 077
+          printf '%s\n' "${AMD_LIGHTNING_TOKEN}" > "${AMD_LIGHTNING_TOKEN_FILE}"
+          printf '%s\n' "${AMD_TRITON_TOKEN}" > "${AMD_TRITON_TOKEN_FILE}"
+
           DOCKER_BUILDKIT=1 docker build \
             -f .github/ffm/Dockerfile.ffm \
             --secret id=netrc,src="${NETRC}" \
-            --ssh amd="${AMD_KEY_FILE}" \
+            --secret id=amd_lightning_token,src="${AMD_LIGHTNING_TOKEN_FILE}" \
+            --secret id=amd_triton_token,src="${AMD_TRITON_TOKEN_FILE}" \
             --build-arg BASE_IMAGE="${BASE_IMAGE}" \
             --build-arg FFM_URL="${{ steps.ffm.outputs.ffm_url }}" \
             --build-arg FFM_PACKAGE="${{ steps.ffm.outputs.ffm_package }}" \
@@ -293,7 +316,8 @@ jobs:
         run: |
           rm -f "${GITHUB_WORKSPACE}/.artifactory-netrc-${GITHUB_RUN_ID}"* \
                 "${GITHUB_WORKSPACE}/.ffm-version-${GITHUB_RUN_ID}" 2>/dev/null || true
-          rm -f "${RUNNER_TEMP}/amd-github-key-${GITHUB_RUN_ID}" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/amd-lightning-token-${GITHUB_RUN_ID}" \
+                "${RUNNER_TEMP}/amd-triton-token-${GITHUB_RUN_ID}" 2>/dev/null || true
           rm -rf "${GITHUB_WORKSPACE}/.docker-ffm-${GITHUB_RUN_ID}" 2>/dev/null || true
           docker logout 2>/dev/null || true
           docker rmi "${FFM_IMAGE}" 2>/dev/null || true
