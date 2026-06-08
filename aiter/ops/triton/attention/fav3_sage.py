@@ -745,190 +745,91 @@ def _assemble_full_block_mask(
     return full
 
 
-def block_attn_mask_to_ragged_lut_topn_front(
+def block_attn_mask_to_ragged_lut_sorted(
     block_attn_mask: torch.Tensor,
     pooled_score: torch.Tensor,
-    sample_n: int,
     num_heads: Optional[int] = None,
-    force_front_mask: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Build a ragged LUT with the top-``sample_n`` scored K blocks emitted first.
+    return_none_if_dense: bool = False,
+) -> Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Build a ragged LUT with attended K blocks emitted in descending score order.
 
     Like :func:`aiter.ops.triton.attention.utils.block_attn_mask_to_ragged_lut`,
     this turns a block attention mask into a ragged
     ``(kv_block_indices, lut_start, lut_count)`` LUT, but within each
-    ``(batch, head, q_block)`` segment it emits blocks in this order:
-
-      1. the ``sample_n`` highest ``pooled_score`` blocks, descending score;
-      2. the ``force_front_mask`` blocks (e.g. text), ascending block index;
-      3. the remaining attended blocks, ascending block index.
-
-    Building the LUT directly from the mask lets us write each segment out in the
-    desired order in a single pass -- no separate reorder of a pre-built LUT, and
-    the result is compactly packed (no over-allocation).
+    ``(batch, head, q_block)`` segment it emits the attended blocks sorted by
+    ``pooled_score`` descending instead of by ascending block index.
 
     This pairs with the ``freeze_softmax_max_count`` block-sparse path
     (:func:`fav3_sage_func`): the online-softmax running max is frozen after the
     first few inner-loop iterations, so visiting the highest-scoring (and thus
-    likely highest-max) tiles -- plus any always-attended ``force_front`` tiles --
-    first makes the frozen max a tight estimate. See ``fav3_sage_vfa.py`` for the
-    analogous pooled-score top-N block selection.
+    likely highest-max) tiles first makes the frozen max a tight estimate.
+
+    The LUT is packed with a static-shape scatter into an over-allocated buffer
+    (no boolean-mask indexing or ``.sum().item()``), so the whole function keeps a
+    fixed shape graph and is ``torch.compile``-friendly, matching
+    :func:`block_attn_mask_to_ragged_lut`.
 
     Args:
         block_attn_mask: ``(B, num_q_blocks, num_k_blocks)`` (shared across heads)
             or ``(B, H, num_q_blocks, num_k_blocks)`` bool mask. True = attend.
         pooled_score: fp32 ``(B, H, num_q_blocks, num_k_blocks)`` block-level
             attention score (e.g. from :func:`get_block_map_meansim`). Only blocks
-            that are attended in ``block_attn_mask`` are ever selected.
-        sample_n: number of top-scored tiles to emit first per segment. ``<= 0``
-            emits only the ``force_front`` tiles ahead of the rest.
+            attended in ``block_attn_mask`` are emitted; the score determines their
+            order. Use ``+inf`` for blocks that must lead the segment.
         num_heads: number of Q heads; required when ``block_attn_mask`` is 3D.
-        force_front_mask: optional bool mask, same shape/broadcast as
-            ``block_attn_mask``, of blocks to place immediately after the sampled
-            tiles. Excluded from the top-``sample_n`` selection; only the
-            attended ones are emitted.
+        return_none_if_dense: If True and the mask is all True (dense), return None
+            so the caller can take the dense path instead of building a large LUT.
 
     Returns:
         ``kv_block_indices`` (1D int32), ``lut_start`` (1D int32) and
         ``lut_count`` (1D int32), indexed by
         ``idx = b * (H * num_q_blocks) + h * num_q_blocks + q_block``.
+        When ``return_none_if_dense`` is True and the mask is all True, returns None.
     """
+    device = block_attn_mask.device
+
     if block_attn_mask.dim() == 3:
         if num_heads is None:
             raise ValueError("num_heads must be provided when block_attn_mask is 3D")
         B, Q, K = block_attn_mask.shape
+        if return_none_if_dense and block_attn_mask.all():
+            return None
         block_attn_mask = block_attn_mask.unsqueeze(1).expand(B, num_heads, Q, K)
-        if force_front_mask is not None and force_front_mask.dim() == 3:
-            force_front_mask = force_front_mask.unsqueeze(1).expand(B, num_heads, Q, K)
 
     B, H, Q, K = block_attn_mask.shape
+    if return_none_if_dense and block_attn_mask.all():
+        return None
     assert pooled_score.shape[:3] == (B, H, Q) and pooled_score.shape[-1] == K, (
         f"pooled_score shape {tuple(pooled_score.shape)} does not match mask "
         f"{(B, H, Q, K)}"
     )
-    device = block_attn_mask.device
 
     attended = block_attn_mask.to(torch.bool)
     lut_count = attended.sum(-1).to(torch.int32).reshape(-1)
     lut_start = torch.cumsum(lut_count, 0) - lut_count
 
-    if force_front_mask is None:
-        force_front = torch.zeros_like(attended)
-    else:
-        # Only attended blocks can be emitted at all.
-        force_front = force_front_mask.to(torch.bool).expand(B, H, Q, K) & attended
-
+    # Sort each row by score descending; unattended blocks get -inf so they sort
+    # past the per-row count and are dropped.
     neg_inf = pooled_score.new_full((), float("-inf"))
     masked_score = torch.where(attended, pooled_score.to(torch.float32), neg_inf)
-
-    # Mark the top-``sample_n`` attended, non-force-front blocks per (B, H, Q) row.
-    is_topn = torch.zeros((B, H, Q, K), dtype=torch.bool, device=device)
-    n = min(sample_n, K)
-    if n > 0:
-        sample_score = torch.where(force_front, neg_inf, masked_score)
-        topk = sample_score.topk(n, dim=-1)
-        # A row with fewer than n candidates pads topk with -inf entries; mark
-        # only the finite (genuinely attended, non-force-front) selections.
-        is_topn.scatter_(-1, topk.indices, topk.values > neg_inf)
-
-    # Per-row ordering of the K blocks by (priority, tiebreak):
-    #   0 = attended & top-n      -> descending score (highest-max first)
-    #   1 = attended & force-front -> ascending block index
-    #   2 = attended, the rest    -> ascending block index
-    #   3 = not attended          -> sorts past the per-row count, so dropped
-    col = torch.arange(K, device=device).view(1, 1, 1, K)
-    priority = torch.where(
-        ~attended,
-        3,
-        torch.where(is_topn, 0, torch.where(force_front, 1, 2)),
-    )
-    tiebreak = torch.where(is_topn, -masked_score, col.to(torch.float32))
-
-    # Lexicographic (priority, tiebreak) sort per row via two stable sorts.
-    o1 = torch.argsort(tiebreak, dim=-1, stable=True)
-    order = torch.gather(
-        o1, -1, torch.argsort(torch.gather(priority, -1, o1), dim=-1, stable=True)
-    )
-
-    # The first ``count`` entries of each row are exactly the attended blocks in
-    # the desired order; pack them row-major into the ragged index list.
+    order = torch.argsort(masked_score, dim=-1, descending=True).to(torch.int32)
     rows = order.reshape(B * H * Q, K)
-    keep = torch.arange(K, device=device)[None, :] < lut_count[:, None]
-    kv_block_indices = rows[keep].to(torch.int32).contiguous()
+
+    # Pack via a static-shape scatter: the first ``count`` (descending-score)
+    # entries of each row go to kv[lut_start + rank]; the rest (unattended) are
+    # dumped into a single scratch slot at the end and dropped. Over-allocating to
+    # max_count keeps every shape fixed -- no data-dependent boolean indexing.
+    #
+    # NOTE: like block_attn_mask_to_ragged_lut, the LUT is overallocated to avoid
+    # a lut_count.sum() that would graph-break under torch.compile.
+    max_count = B * H * Q * K
+    rank = torch.arange(K, device=device)[None, :]
+    valid = rank < lut_count[:, None]
+    dest = torch.where(valid, lut_start[:, None].to(torch.int64) + rank, max_count)
+    kv_block_indices = torch.empty(max_count + 1, dtype=torch.int32, device=device)
+    kv_block_indices.scatter_(0, dest.reshape(-1), rows.reshape(-1))
+    kv_block_indices = kv_block_indices[:max_count]
     return kv_block_indices, lut_start, lut_count
-
-
-def reorder_lut_topn_to_front(
-    lut: Tuple[torch.Tensor, torch.Tensor, torch.Tensor],
-    pooled_score: torch.Tensor,
-    sample_n: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Reorder an existing ragged LUT so top-``sample_n`` scored blocks lead each segment.
-
-    Companion to :func:`block_attn_mask_to_ragged_lut_topn_front` for when you
-    already hold a ragged LUT and no longer have the mask. It permutes the
-    attended K-block indices *within each* ``(batch, head, q_block)`` segment so
-    the ``sample_n`` highest ``pooled_score`` blocks come first (descending
-    score), with the rest kept in their original order. ``lut_start``/
-    ``lut_count`` are returned unchanged.
-
-    Prefer :func:`block_attn_mask_to_ragged_lut_topn_front` when you still have
-    the mask: it builds the ordered LUT in one pass and packs it compactly.
-    """
-    kv_block_indices, lut_start, lut_count = lut
-
-    B, H, Q, K = pooled_score.shape
-    num_segments = lut_count.numel()
-    assert num_segments == B * H * Q, (
-        f"lut_count has {num_segments} segments but pooled_score implies {B * H * Q} "
-        "(B*H*num_q_blocks)"
-    )
-
-    total_valid = int(lut_count.sum().item())
-    if sample_n <= 0 or total_valid == 0:
-        return kv_block_indices, lut_start, lut_count
-
-    device = kv_block_indices.device
-    pooled_flat = pooled_score.reshape(num_segments, K).to(torch.float32)
-
-    # Per-LUT-position segment id and the K-block it currently points at.
-    seg_id = torch.repeat_interleave(
-        torch.arange(num_segments, device=device), lut_count.to(torch.long)
-    )
-    kv_valid = kv_block_indices[:total_valid].to(torch.long)
-
-    # Restrict the top-n proposal to blocks actually present in the LUT so a
-    # finite-but-unattended pooled_score entry can never be selected.
-    attended = torch.zeros((num_segments, K), dtype=torch.bool, device=device)
-    attended[seg_id, kv_valid] = True
-    neg_inf = pooled_flat.new_full((), float("-inf"))
-    masked_score = torch.where(attended, pooled_flat, neg_inf)
-
-    n = min(sample_n, K)
-    topk = masked_score.topk(n, dim=-1)
-    is_topn_flat = torch.zeros((num_segments, K), dtype=torch.bool, device=device)
-    # A segment with fewer than n attended blocks yields -inf padding in topk;
-    # mark only the finite (genuinely attended) selections.
-    is_topn_flat.scatter_(1, topk.indices, topk.values > neg_inf)
-
-    score_pos = pooled_flat[seg_id, kv_valid]
-    is_topn_pos = is_topn_flat[seg_id, kv_valid]
-
-    # Lexicographic sort key (seg_id, priority, tiebreak) built via a cascade of
-    # stable sorts (least-significant first):
-    #   priority: 0 for moved (top-n) tiles, 1 for the rest.
-    #   tiebreak: moved tiles by descending score; the rest by original order.
-    pos = torch.arange(total_valid, device=device)
-    priority = (~is_topn_pos).to(torch.int64)
-    tiebreak = torch.where(is_topn_pos, -score_pos, pos.to(torch.float32))
-
-    o1 = torch.argsort(tiebreak, stable=True)
-    o2 = o1[torch.argsort(priority[o1], stable=True)]
-    final_perm = o2[torch.argsort(seg_id[o2], stable=True)]
-
-    new_kv = kv_block_indices.clone()
-    new_kv[:total_valid] = kv_block_indices[:total_valid][final_perm]
-    return new_kv, lut_start, lut_count
 
 
 def build_attention_lut(
@@ -1022,22 +923,18 @@ def build_attention_lut(
     if mode == "sparge":
         return block_attn_mask_to_ragged_lut(full_mask), -1
 
-    # vfa / both: front-load the top-n sampled image tiles, then the dense text
-    # tiles. Scores live only over the image region; text/text-row positions stay
-    # -inf so they are never picked as sampled tiles (text is forced front).
+    # vfa / both: emit blocks in descending pooled-score order so the highest-max
+    # tiles lead each segment. Scores live only over the image region; the dense
+    # text K cols get +inf so they always sort to the very front (always attended,
+    # and counted in the freeze window), while text-row image positions stay -inf.
     B, H, n_iq, n_ik = image_mask.shape
     n_tq, n_tk = full_mask.shape[-2], full_mask.shape[-1]
     full_score = full_mask.new_full(
         (B, H, n_tq, n_tk), float("-inf"), dtype=torch.float32
     )
     full_score[:, :, :n_iq, :n_ik] = image_score.to(torch.float32)
-
-    force_front = None
     if n_text_k > 0:
-        force_front = torch.zeros((B, H, n_tq, n_tk), dtype=torch.bool, device=q.device)
-        force_front[:, :, :, -n_text_k:] = True
+        full_score[:, :, :, -n_text_k:] = float("inf")
 
-    block_lut = block_attn_mask_to_ragged_lut_topn_front(
-        full_mask, full_score, n_sample, force_front_mask=force_front
-    )
+    block_lut = block_attn_mask_to_ragged_lut_sorted(full_mask, full_score)
     return block_lut, n_sample + n_text_k
