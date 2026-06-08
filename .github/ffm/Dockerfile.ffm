@@ -8,10 +8,8 @@ ARG FFM_SOURCE=dev
 ARG INSTALL_LLVM=yes
 ARG LLVM_REF=amd/dev/jebyrnes/PipelinedSchedulerTriton7
 ARG TRITON_REF=shared/AIDayStaging
-ARG AITER_REPO=git@github.com:ROCm/aiter.git
-ARG AITER_REF=main
 
-COPY --chmod=755 build_llvm_triton.sh /root/build_llvm_triton.sh
+COPY --chmod=755 .github/ffm/build_llvm_triton.sh /root/build_llvm_triton.sh
 
 RUN --mount=type=secret,id=netrc,target=/root/.netrc set -eux; \
     export HOME=/root; \
@@ -25,7 +23,7 @@ RUN --mount=type=secret,id=netrc,target=/root/.netrc set -eux; \
         if [ -f libhsakmtmodel.so ]; then mv libhsakmtmodel.so lib/; fi; \
     fi
 
-COPY --chmod=755 ffmlite_env.sh /ffm/ffmlite_env.sh
+COPY --chmod=755 .github/ffm/ffmlite_env.sh /ffm/ffmlite_env.sh
 RUN grep -q "ffmlite_env.sh" /root/.bashrc \
     || echo "source /ffm/ffmlite_env.sh" >> /root/.bashrc
 
@@ -58,14 +56,9 @@ RUN --mount=type=ssh,id=amd set -eux; \
 
 ENV AITER_USE_SYSTEM_TRITON=1
 
-RUN --mount=type=ssh,id=rocm set -eux; \
-    mkdir -p ~/.ssh; chmod 700 ~/.ssh; \
-    ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null || true; \
-    cd /root; \
-    git clone --recursive "${AITER_REPO}" aiter; \
+COPY . /root/aiter
+RUN set -eux; \
     cd /root/aiter; \
-    git checkout "${AITER_REF}"; \
-    git submodule update --init --recursive; \
     pip install -r requirements.txt; \
     pip install -e . --no-build-isolation
 

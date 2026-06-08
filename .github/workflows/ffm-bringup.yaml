@@ -81,7 +81,6 @@ env:
   BASE_IMAGE: bringup-base:${{ github.run_id }}
   FFM_IMAGE: ffm-bringup:${{ github.run_id }}
   FFM_PUSH_REPO: rocm/ffm-dev
-  AITER_REPO: git@github.com:${{ github.repository }}.git
   AITER_REF: ${{ inputs.aiter_ref || github.event.pull_request.head.sha || github.sha }}
   FFM_SOURCE: ${{ inputs.ffm_source || 'dev' }}
   INSTALL_LLVM: ${{ inputs.install_llvm || 'yes' }}
@@ -98,18 +97,18 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: Checkout workflow files
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.aiter_ref || github.sha }}
           fetch-depth: 1
+          submodules: recursive
 
       - name: Validate parameters and secrets
         env:
           ART_USER: ${{ secrets.ARTIFACTORY_USERNAME }}
           ART_PASS: ${{ secrets.ARTIFACTORY_PASSWORD }}
           AMD_SSH_KEY: ${{ secrets.AMD_GITHUB_SSH_KEY }}
-          ROCM_SSH_KEY: ${{ secrets.ROCM_GITHUB_SSH_KEY }}
         run: |
           set -euo pipefail
 
@@ -121,10 +120,6 @@ jobs:
             echo "::error::Missing AMD_GITHUB_SSH_KEY secret"
             exit 1
           fi
-          if [ -z "${ROCM_SSH_KEY}" ]; then
-            echo "::error::Missing ROCM_GITHUB_SSH_KEY secret"
-            exit 1
-          fi
 
       - name: Prepare temporary credentials
         id: creds
@@ -132,22 +127,18 @@ jobs:
           ART_USER: ${{ secrets.ARTIFACTORY_USERNAME }}
           ART_PASS: ${{ secrets.ARTIFACTORY_PASSWORD }}
           AMD_SSH_KEY: ${{ secrets.AMD_GITHUB_SSH_KEY }}
-          ROCM_SSH_KEY: ${{ secrets.ROCM_GITHUB_SSH_KEY }}
         run: |
           set -euo pipefail
 
           NETRC="${GITHUB_WORKSPACE}/.artifactory-netrc-${GITHUB_RUN_ID}-ffm"
           AMD_KEY_FILE="${RUNNER_TEMP}/amd-github-key-${GITHUB_RUN_ID}"
-          ROCM_KEY_FILE="${RUNNER_TEMP}/rocm-github-key-${GITHUB_RUN_ID}"
 
           umask 077
           printf 'machine %s login %s password %s\n' "${ART_HOST}" "${ART_USER}" "${ART_PASS}" > "${NETRC}"
           printf '%s\n' "${AMD_SSH_KEY}" > "${AMD_KEY_FILE}"
-          printf '%s\n' "${ROCM_SSH_KEY}" > "${ROCM_KEY_FILE}"
 
           echo "netrc=${NETRC}" >> "${GITHUB_OUTPUT}"
           echo "amd_key=${AMD_KEY_FILE}" >> "${GITHUB_OUTPUT}"
-          echo "rocm_key=${ROCM_KEY_FILE}" >> "${GITHUB_OUTPUT}"
 
       - name: Resolve FFM package
         id: ffm
@@ -219,14 +210,12 @@ jobs:
         env:
           NETRC: ${{ steps.creds.outputs.netrc }}
           AMD_KEY_FILE: ${{ steps.creds.outputs.amd_key }}
-          ROCM_KEY_FILE: ${{ steps.creds.outputs.rocm_key }}
         run: |
           set -euo pipefail
           DOCKER_BUILDKIT=1 docker build \
             -f .github/ffm/Dockerfile.ffm \
             --secret id=netrc,src="${NETRC}" \
             --ssh amd="${AMD_KEY_FILE}" \
-            --ssh rocm="${ROCM_KEY_FILE}" \
             --build-arg BASE_IMAGE="${BASE_IMAGE}" \
             --build-arg FFM_URL="${{ steps.ffm.outputs.ffm_url }}" \
             --build-arg FFM_PACKAGE="${{ steps.ffm.outputs.ffm_package }}" \
@@ -234,10 +223,8 @@ jobs:
             --build-arg INSTALL_LLVM="${INSTALL_LLVM}" \
             --build-arg LLVM_REF="${LLVM_REF}" \
             --build-arg TRITON_REF="${TRITON_REF}" \
-            --build-arg AITER_REPO="${AITER_REPO}" \
-            --build-arg AITER_REF="${AITER_REF}" \
             -t "${FFM_IMAGE}" \
-            .github/ffm/
+            .
 
       - name: Run aiter FFM unit test
         if: ${{ github.event_name == 'pull_request' || inputs.run_aiter_ut }}
@@ -306,8 +293,7 @@ jobs:
         run: |
           rm -f "${GITHUB_WORKSPACE}/.artifactory-netrc-${GITHUB_RUN_ID}"* \
                 "${GITHUB_WORKSPACE}/.ffm-version-${GITHUB_RUN_ID}" 2>/dev/null || true
-          rm -f "${RUNNER_TEMP}/amd-github-key-${GITHUB_RUN_ID}" \
-                "${RUNNER_TEMP}/rocm-github-key-${GITHUB_RUN_ID}" 2>/dev/null || true
+          rm -f "${RUNNER_TEMP}/amd-github-key-${GITHUB_RUN_ID}" 2>/dev/null || true
           rm -rf "${GITHUB_WORKSPACE}/.docker-ffm-${GITHUB_RUN_ID}" 2>/dev/null || true
           docker logout 2>/dev/null || true
           docker rmi "${FFM_IMAGE}" 2>/dev/null || true
