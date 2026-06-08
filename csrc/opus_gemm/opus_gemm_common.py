@@ -8,6 +8,19 @@ from typing import List
 # opus_gemm_traits_a16w16_gfx950.cuh).
 _LEGACY_CACHECTL = (0, 17)
 
+_GFX942_KERNEL_NAME_TAGS = {
+    "a16w16_kbuf3_sk": "splitk",
+    "a16w16_kbuf1_sk": "splitk_legacy",
+    "a16w16_kbuf2v_sk": "splitk_p1",
+    "a16w16_kbuf2v_bk128_sk": "splitk_p1_bk128",
+    "a16w16_em3en4_lds1_pgr2_sk": "splitk_em3en4_lds1_pgr2",
+    "a16w16_wave_k_coop": "wkc",
+    "a16w16_kbuf2v": "p1",
+    "a16w16_kbuf2v_bk128": "p1_bk128",
+    "a16w16_kbuf3": "w3",
+    "a16w16_kbuf1": "legacy",
+}
+
 
 @dataclass
 class OpusGemmInstance:
@@ -48,6 +61,10 @@ class OpusGemmInstance:
 
     # Optional arch prefix (e.g.
     arch_prefix: str = ""
+    # Optional generated name tag override for same-pipeline variants.
+    name_tag: str = ""
+    # SplitK workspace storage dtype; splitK launchers still use fp32 tune dispatch.
+    splitk_workspace_dtype: str = "fp32_t"
 
     @property
     def name(self) -> str:
@@ -72,26 +89,11 @@ class OpusGemmInstance:
             parts.insert(tag_at, "persistent")
         elif self.kernel_tag == "a16w16_mono_tile":
             parts.insert(tag_at, "mono_tile")
-        elif self.kernel_tag == "a16w16_kbuf3_sk":
-            parts.insert(tag_at, "splitk")
-        elif self.kernel_tag == "a16w16_kbuf1_sk":
-            parts.insert(tag_at, "splitk_legacy")
-        elif self.kernel_tag == "a16w16_kbuf2v_sk":
-            parts.insert(tag_at, "splitk_p1")
-        elif self.kernel_tag == "a16w16_kbuf2v_bk128_sk":
-            parts.insert(tag_at, "splitk_p1_bk128")
-        elif self.kernel_tag == "a16w16_em3en4_lds1_pgr2_sk":
-            parts.insert(tag_at, "splitk_em3en4_lds1_pgr2")
-        elif self.kernel_tag == "a16w16_wave_k_coop":
-            parts.insert(tag_at, "wkc")
-        elif self.kernel_tag == "a16w16_kbuf2v":
-            parts.insert(tag_at, "p1")
-        elif self.kernel_tag == "a16w16_kbuf2v_bk128":
-            parts.insert(tag_at, "p1_bk128")
-        elif self.kernel_tag == "a16w16_kbuf3":
-            parts.insert(tag_at, "w3")
-        elif self.kernel_tag == "a16w16_kbuf1":
-            parts.insert(tag_at, "legacy")
+        elif self.name_tag:
+            parts.insert(tag_at, self.name_tag)
+        elif self.kernel_tag in _GFX942_KERNEL_NAME_TAGS:
+            name_tag = _GFX942_KERNEL_NAME_TAGS[self.kernel_tag]
+            parts.insert(tag_at, name_tag)
         if not self.has_oob:
             parts.append("nooob")
         if self.is_4g_safe:
@@ -528,6 +530,19 @@ def _a16w16_kbuf1_sk_gfx942(bs, bm, bn, bk, tn, wm, wn, wk):
     )
 
 
+def _with_bf16_splitk_workspace(inst, name_tag):
+    """Variant marker: same splitK pipeline, bf16 workspace + generated name tag."""
+    inst.name_tag = name_tag
+    inst.splitk_workspace_dtype = "bf16_t"
+    return inst
+
+
+def _a16w16_kbuf1_sk_bf16ws_gfx942(bs, bm, bn, bk, tn, wm, wn, wk):
+    """SplitK 4-phase split-barrier with bf16 workspace."""
+    inst = _a16w16_kbuf1_sk_gfx942(bs, bm, bn, bk, tn, wm, wn, wk)
+    return _with_bf16_splitk_workspace(inst, "splitk_legacy_bf16ws")
+
+
 # gfx942 P1-family non-splitK factories (siblings of corresponding splitK kids).
 def _a16w16_p1_gfx942(bs, bm, bn, bk, tn, wm, wn, wk):
     """Non-splitK P1 (W3 K-dbuf depth=2 + V-dbuf), sibling of 50211."""
@@ -624,6 +639,7 @@ gfx942_splitk_kernels_list = {
     50211: _a16w16_kbuf2v_sk_gfx942     (256,  64,  64,  64,    2, 16, 16, 16),                # P1 depth=2 + V-dbuf
     50204: _a16w16_em3en4_lds1_pgr2_sk_gfx942 (256, 128,  96, 128,    2, 16, 16, 16),                # EM3EN4 LDS1/PGR2 hipb-orientation (host 128M x 96N)
     50205: _a16w16_kbuf1_sk_gfx942      (512,  64, 128,  64,    4, 16, 16, 16),                # legacy 4-phase M64 x N128
+    50206: _a16w16_kbuf1_sk_bf16ws_gfx942(512, 128, 128,  64,    4, 16, 16, 16),                # legacy 4-phase large tile + bf16 workspace
 }
 
 # NOTE: 50402 (a16w16_naive_64x64) was removed -- 32.85us never matched WKC's
@@ -752,6 +768,7 @@ HEURISTIC_DEFAULT_KIDS_GFX942 = frozenset(
         50203,  # gfx942 splitk_p1_bk128  256x64x64x128 (B_K=128 Option B; dev/bench)
         50204,  # gfx942 splitk_em3en4_lds1_pgr2 256x128x96x128 hipb-orientation
         50205,  # gfx942 splitk_legacy    512x64x128x64 16x16x16
+        50206,  # gfx942 splitk_legacy_bf16ws 512x128x128x64
         # Non-splitK siblings of the corresponding splitK kids.
         50001,  # a16w16_kbuf3        non-splitK sibling of 50201
         50002,  # a16w16_kbuf1    non-splitK sibling of 50202 (E_M=2)

@@ -5,6 +5,8 @@
 // swizzle wrapper, and epilogue store helpers used by all kid families.
 #pragma once
 
+#include <type_traits>
+
 #ifdef __HIP_DEVICE_COMPILE__
 
 // X1b row^col XOR swizzle wrapper (BC=0 verified at STRIDE_ELEM=512).
@@ -404,13 +406,16 @@ OPUS_D inline void epilogue_store_c_lds_staged(
     }
 }
 
-// SplitK workspace store: fp32 + sc0+nt (aux=3) write-through to bypass L1
+// SplitK workspace store: sc0+nt (aux=3) write-through to bypass L1
 // (cache-line stale-merge caused max_diff 35%->0.03% regression before 2026-06-01).
 template<typename T, typename Mma, typename GC, typename Kargs, typename VC>
 OPUS_D inline void epilogue_store_workspace_sc0nt(
     Mma& mma, GC& g_c, const Kargs& kargs,
     VC& v_c, int wave_id_m, int wave_id_n, int lane_id)
 {
+    using D_C = typename T::D_C;
+    using D_ACC = typename T::D_ACC;
+
     auto p_coord_c = opus::make_tuple(wave_id_m, lane_id % mma.grpn_c,
                                       wave_id_n, lane_id / mma.grpn_c);
     auto u_gc = opus::partition_layout_c<T::VEC_C>(mma,
@@ -420,10 +425,21 @@ OPUS_D inline void epilogue_store_workspace_sc0nt(
         return half_m * T::HALF_B_M * kargs.stride_ws + half_n * T::HALF_B_N;
     };
 
-    opus::store<T::VEC_C>(g_c, v_c[0][0], u_gc, ws_offset(0, 0), opus::number<3>{});
-    opus::store<T::VEC_C>(g_c, v_c[0][1], u_gc, ws_offset(0, 1), opus::number<3>{});
-    opus::store<T::VEC_C>(g_c, v_c[1][0], u_gc, ws_offset(1, 0), opus::number<3>{});
-    opus::store<T::VEC_C>(g_c, v_c[1][1], u_gc, ws_offset(1, 1), opus::number<3>{});
+    if constexpr (std::is_same_v<D_C, D_ACC>) {
+        opus::store<T::VEC_C>(g_c, v_c[0][0], u_gc, ws_offset(0, 0), opus::number<3>{});
+        opus::store<T::VEC_C>(g_c, v_c[0][1], u_gc, ws_offset(0, 1), opus::number<3>{});
+        opus::store<T::VEC_C>(g_c, v_c[1][0], u_gc, ws_offset(1, 0), opus::number<3>{});
+        opus::store<T::VEC_C>(g_c, v_c[1][1], u_gc, ws_offset(1, 1), opus::number<3>{});
+    } else {
+        auto c00 = opus::cast<D_C>(v_c[0][0]);
+        auto c01 = opus::cast<D_C>(v_c[0][1]);
+        auto c10 = opus::cast<D_C>(v_c[1][0]);
+        auto c11 = opus::cast<D_C>(v_c[1][1]);
+        opus::store<T::VEC_C>(g_c, c00, u_gc, ws_offset(0, 0), opus::number<3>{});
+        opus::store<T::VEC_C>(g_c, c01, u_gc, ws_offset(0, 1), opus::number<3>{});
+        opus::store<T::VEC_C>(g_c, c10, u_gc, ws_offset(1, 0), opus::number<3>{});
+        opus::store<T::VEC_C>(g_c, c11, u_gc, ws_offset(1, 1), opus::number<3>{});
+    }
 }
 
 #endif // __HIP_DEVICE_COMPILE__

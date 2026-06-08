@@ -105,7 +105,7 @@ struct opus_gemm_noscale_kargs {
 struct opus_gemm_splitk_kargs {
     const void* __restrict__ ptr_a;         // bf16 [B, M, K]
     const void* __restrict__ ptr_b;         // bf16 [B, N, K] (pre-transposed)
-    void*       __restrict__ ptr_workspace; // fp32 [split_k, B, padded_M, padded_N]
+    void*       __restrict__ ptr_workspace; // splitK workspace [split_k, B, padded_M, padded_N]
     void*       __restrict__ ptr_c;         // bf16 [B, M, N] final output (reduce kernel writes)
     const void* __restrict__ ptr_bias;      // unused (reserved)
     int m;
