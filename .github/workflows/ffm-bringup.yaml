@@ -1,8 +1,14 @@
 name: FFM Bringup
 
-run-name: FFM ${{ inputs.ffm_source }} ${{ inputs.ffm_build_num_dir || 'latest' }} / aiter ${{ inputs.aiter_ref || github.sha }}
+run-name: FFM ${{ inputs.ffm_source || 'dev' }} ${{ (github.event_name == 'pull_request' && '20260527.195754') || inputs.ffm_build_num_dir || 'latest' }} / aiter ${{ inputs.aiter_ref || github.event.pull_request.head.sha || github.sha }}
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths:
+      - ".github/ffm/**"
+      - ".github/workflows/ffm-bringup.yaml"
   workflow_dispatch:
     inputs:
       runner:
@@ -66,7 +72,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.ffm_source }}-${{ inputs.ffm_build_num_dir || 'latest' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.ffm_source || 'dev' }}-${{ (github.event_name == 'pull_request' && '20260527.195754') || inputs.ffm_build_num_dir || 'latest' }}
   cancel-in-progress: false
 
 env:
@@ -76,12 +82,19 @@ env:
   FFM_IMAGE: ffm-bringup:${{ github.run_id }}
   FFM_PUSH_REPO: rocm/ffm-dev
   AITER_REPO: git@github.com:${{ github.repository }}.git
-  AITER_REF: ${{ inputs.aiter_ref || github.sha }}
+  AITER_REF: ${{ inputs.aiter_ref || github.event.pull_request.head.sha || github.sha }}
+  FFM_SOURCE: ${{ inputs.ffm_source || 'dev' }}
+  INSTALL_LLVM: ${{ inputs.install_llvm || 'yes' }}
+  LLVM_REF: ${{ inputs.llvm_ref || 'amd/dev/jebyrnes/PipelinedSchedulerTriton7' }}
+  TRITON_REF: ${{ inputs.triton_ref || 'shared/AIDayStaging' }}
+  FFM_BUILD_NUM_DIR: ${{ (github.event_name == 'pull_request' && '20260527.195754') || inputs.ffm_build_num_dir }}
+  FFM_PACKAGE_INPUT: ${{ (github.event_name == 'pull_request' && 'ubuntu_24_04_rel.tar.gz') || inputs.ffm_package }}
 
 jobs:
   ffm:
     name: Build, Test, and Optionally Push FFM
-    runs-on: ${{ inputs.runner }}
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ${{ inputs.runner || 'linux-aiter-mi35x-1' }}
     timeout-minutes: 360
 
     steps:
@@ -140,9 +153,6 @@ jobs:
         id: ffm
         env:
           NETRC: ${{ steps.creds.outputs.netrc }}
-          FFM_SOURCE: ${{ inputs.ffm_source }}
-          FFM_BUILD_NUM_DIR: ${{ inputs.ffm_build_num_dir }}
-          FFM_PACKAGE_INPUT: ${{ inputs.ffm_package }}
         run: |
           set -euo pipefail
 
@@ -220,17 +230,17 @@ jobs:
             --build-arg BASE_IMAGE="${BASE_IMAGE}" \
             --build-arg FFM_URL="${{ steps.ffm.outputs.ffm_url }}" \
             --build-arg FFM_PACKAGE="${{ steps.ffm.outputs.ffm_package }}" \
-            --build-arg FFM_SOURCE="${{ inputs.ffm_source }}" \
-            --build-arg INSTALL_LLVM="${{ inputs.install_llvm }}" \
-            --build-arg LLVM_REF="${{ inputs.llvm_ref }}" \
-            --build-arg TRITON_REF="${{ inputs.triton_ref }}" \
+            --build-arg FFM_SOURCE="${FFM_SOURCE}" \
+            --build-arg INSTALL_LLVM="${INSTALL_LLVM}" \
+            --build-arg LLVM_REF="${LLVM_REF}" \
+            --build-arg TRITON_REF="${TRITON_REF}" \
             --build-arg AITER_REPO="${AITER_REPO}" \
             --build-arg AITER_REF="${AITER_REF}" \
             -t "${FFM_IMAGE}" \
             .github/ffm/
 
       - name: Run aiter FFM unit test
-        if: ${{ inputs.run_aiter_ut }}
+        if: ${{ github.event_name == 'pull_request' || inputs.run_aiter_ut }}
         run: |
           set -euo pipefail
 
