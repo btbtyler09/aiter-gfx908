@@ -1,9 +1,34 @@
+# Provenance: the gfx908 (MI100) AITER source baked into this image is
+# published at https://github.com/btbtyler09/aiter-gfx908 (branch
+# mi100-optimized). The default build COPYs the local checkout (fast dev path),
+# which must correspond to that ref. For a fully reproducible build from public
+# sources, set AITER_FROM_GIT=1 to clone the pinned ref instead.
+#   docker build -f Dockerfile.mi100 --build-arg AITER_FROM_GIT=1 \
+#     --build-arg AITER_GIT_REF=<commit-or-branch> -t aiter-mi100:latest .
+ARG AITER_GIT_REPO=https://github.com/btbtyler09/aiter-gfx908.git
+ARG AITER_GIT_REF=mi100-optimized
+ARG AITER_FROM_GIT=0
+
 FROM btbtyler09/vllm-dev-mi100:2026.04.18
+
+ARG AITER_GIT_REPO
+ARG AITER_GIT_REF
+ARG AITER_FROM_GIT
 
 WORKDIR /workspace/aiter
 
-# Copy entire repo (respecting .dockerignore)
-COPY . .
+# Default (AITER_FROM_GIT=0): copy the local checkout (must match the published
+# ref above). AITER_FROM_GIT=1: clone the pinned public ref for reproducibility.
+COPY . /tmp/aiter_local
+RUN if [ "$AITER_FROM_GIT" = "1" ]; then \
+        echo "Building AITER from ${AITER_GIT_REPO}@${AITER_GIT_REF}"; \
+        git clone --recursive "$AITER_GIT_REPO" /workspace/aiter && \
+        cd /workspace/aiter && git checkout "$AITER_GIT_REF" && \
+        git submodule update --init --recursive; \
+    else \
+        echo "Building AITER from local checkout (must match ${AITER_GIT_REF})"; \
+        cp -a /tmp/aiter_local/. /workspace/aiter/; \
+    fi && rm -rf /tmp/aiter_local
 
 # Install AITER in editable mode with JIT compilation
 # PREBUILD_KERNELS=0 means CK kernels compile on first use (JIT)
