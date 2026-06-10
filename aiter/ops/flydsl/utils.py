@@ -69,4 +69,12 @@ def get_shared_memory_per_block(device=None, fallback_gfx: str = "") -> int:
 
 
 def is_flydsl_available() -> bool:
-    return importlib.util.find_spec("flydsl") is not None
+    if importlib.util.find_spec("flydsl") is None:
+        return False
+    # FlyDSL kernels target gfx9 archs in flydsl's SMEM_CAPACITY_MAP; gfx908
+    # is absent (module-scope SMEM lookups KeyError at import on MI100).
+    try:
+        gfx = torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    except Exception:
+        return True
+    return gfx not in ("gfx908",)
