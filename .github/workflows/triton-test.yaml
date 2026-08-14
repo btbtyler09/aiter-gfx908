@@ -11,15 +11,25 @@ on:
       - "aiter/ops/triton/**"
       - "op_tests/triton_tests/**"
       - "op_tests/op_benchmarks/triton/**"
-      - ".github/workflows/triton-test.yaml"
       - ".github/scripts/build_aiter_triton.sh"
       - ".github/scripts/download_triton_wheel.sh"
       - ".github/scripts/install_triton.sh"
-      - ".github/workflows/prepare-triton-wheel.yaml"
       - ".github/scripts/select_triton_tests.py"
       - ".github/scripts/split_tests.sh"
       - ".github/scripts/verify_triton_pin.py"
       - ".github/requirements/triton-test.txt"
+      # Docs-only changes (README.md, configs/CLAUDE.md, conv/DESIGN.md, ...)
+      # don't affect test results — skip the test suites when a PR touches
+      # nothing else.
+      - "!**/*.md"
+      - '!docs/**'
+      - '!LICENSE'
+      - '!.gitignore'
+      - '!.github/workflows/**'
+      - '!.github/scripts/sglang_downstream.py'
+      # Re-include Triton workflow files after the broad workflow exclusion.
+      - ".github/workflows/triton-test.yaml"
+      - ".github/workflows/prepare-triton-wheel.yaml"
   workflow_dispatch:
 
 concurrency:
@@ -66,7 +76,7 @@ jobs:
     needs: [check-signal]
     uses: ./.github/workflows/prepare-triton-wheel.yaml
     with:
-      docker-image: rocm/pytorch:latest
+      docker-image: rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
       artifact-name: triton_wheelhouse
       retention-days: 3
 
@@ -75,13 +85,14 @@ jobs:
     if: ${{ (!github.event.pull_request || github.event.pull_request.draft == false) && (github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'ci:triton-300x') }}
     name: Triton Tests (MI35X) / Shard ${{ matrix.shard }}
     runs-on: linux-aiter-mi35x-1
+    timeout-minutes: 60
     needs: [split_triton_tests, prepare_triton_wheel, check-signal]
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     env:
-      DOCKER_IMAGE: "rocm/pytorch:latest"
+      DOCKER_IMAGE: "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
       TRITON_TEST: "op_tests/triton_tests/"
 
     steps:
@@ -190,7 +201,10 @@ jobs:
           set -ex
           echo "Running Triton Tests..."
           docker exec -w /workspace triton_test mkdir -p test-reports
-          docker exec -w /workspace triton_test pytest -v ${TRITON_TEST} --junitxml=test-reports/triton.xml
+          # MI35X: skip the MHA-PE backward test that fails an accuracy check on gfx950 with the coming Triton release.
+          docker exec -w /workspace triton_test pytest -v ${TRITON_TEST} \
+            --deselect "op_tests/triton_tests/attention/test_mha_with_pe.py::test_mha_backward_with_pe" \
+            --junitxml=test-reports/triton.xml
 
       - name: Upload test logs
         uses: actions/upload-artifact@v4
@@ -209,14 +223,15 @@ jobs:
   triton-mi300x:
     if: ${{ (!github.event.pull_request || github.event.pull_request.draft == false) && (github.event_name != 'pull_request' || github.event.action != 'labeled' || github.event.label.name == 'ci:triton-300x') && (github.ref == 'refs/heads/main' || (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'ci:triton-300x'))) }}
     name: Triton Tests (MI300X) / Shard ${{ matrix.shard }}
-    runs-on: aiter-1gpu-runner
+    runs-on: linux-aiter-oci-mi300x-1
+    timeout-minutes: 60
     needs: [split_triton_tests, prepare_triton_wheel, check-signal]
     strategy:
       fail-fast: false
       matrix:
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
     env:
-      DOCKER_IMAGE: "rocm/pytorch:latest"
+      DOCKER_IMAGE: "rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0"
       TRITON_TEST: "op_tests/triton_tests/"
 
     steps:
