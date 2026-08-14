@@ -4,13 +4,13 @@
 #pragma once
 
 #include "aiter_hip_common.h"
+#include "aiter_stream.h"
+#include "aiter_tensor.h"
 #include "custom_all_reduce.cuh"
 #include "mla.h"
 #include "opus/opus.hpp"
 #include "pa.h"
-#include <ATen/hip/HIPContext.h>
-#include <ATen/hip/impl/HIPGuardImplMasqueradingAsCUDA.h>
-#include <torch/python.h>
+#include <hip/hip_runtime.h>
 
 // Integer utility helpers (replacing ck_tile equivalents)
 template <typename T>
@@ -88,6 +88,10 @@ struct MlaMetadataV1KernelParameter
     int32_t qk_batch_ratio;
     int32_t num_splits;
     bool is_causal;
+    // round-robin context-parallel: when true, skip the per-qo-tile local-causal
+    // KV trim (batch_tail) so each work spans the full local kv; the kernel masks
+    // on GLOBAL positions instead.
+    bool is_cp_round_robin;
     int32_t fixed_over_head_num_blocks;
     int32_t tail_done_threshold;
 };

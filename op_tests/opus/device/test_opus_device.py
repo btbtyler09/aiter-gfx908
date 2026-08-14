@@ -274,6 +274,13 @@ class OpusDeviceLib:
         fn.argtypes = [_VP, _VP, _I]
         fn(self._ptr(Src), self._ptr(Dst), int(Src.numel()))
 
+    # -- async_load with compile-time immediate offset (i_os) --
+    def run_async_load_ioffset(self, Src, Dst, ios_bytes):
+        fn = self._lib.run_async_load_ioffset
+        fn.restype = None
+        fn.argtypes = [_VP, _VP, _I]
+        fn(self._ptr(Src), self._ptr(Dst), int(ios_bytes))
+
     # -- tr_load_f16 --
     def run_tr_load_f16(self, Src, Dst):
         fn = self._lib.run_tr_load_f16
@@ -357,6 +364,13 @@ class OpusDeviceLib:
         fn.restype = None
         fn.argtypes = [_VP, _VP, _VP, _I]
         fn(self._ptr(Input), self._ptr(Workspace), self._ptr(Result), int(n_chunks))
+
+    # -- tdm functional coverage (gfx1250) --
+    def run_tdm_feature_suite(self):
+        fn = self._lib.run_tdm_feature_suite
+        fn.restype = _I
+        fn.argtypes = []
+        return int(fn())
 
 
 def _get_gpu_arch():
@@ -965,11 +979,22 @@ def test_mxfp4_16x16x128(mod):
 _WMMA_SCALE_ARCHS = {"gfx1250"}
 
 
+def _wmma_scale_unavailable(mod, variant, arch):
+    """Whether to skip a wmma_scale variant, on either of the two grounds it can be
+    absent: the arch has no such instruction, or setup.py left test_wmma_scale.cu out of
+    the .so. The second needs checking too -- every launcher here is looked up by name at
+    call time, so a missing one raises out of the whole run instead of skipping one test.
+    """
+    if arch not in _WMMA_SCALE_ARCHS:
+        print(f"  SKIP: {variant} requires {_WMMA_SCALE_ARCHS}, got '{arch}'")
+        return True
+    return _skip_if_missing_symbol(mod, f"run_{variant}", variant)
+
+
 def _test_wmma_scale_fp8(mod, variant, bx16=False):
     """Test WMMA scale fp8 (16x16x128 f8f6f4). Returns 0 on pass, 1 on fail."""
     arch = _get_gpu_arch()
-    if arch not in _WMMA_SCALE_ARCHS:
-        print(f"  SKIP: {variant} requires {_WMMA_SCALE_ARCHS}, got '{arch}'")
+    if _wmma_scale_unavailable(mod, variant, arch):
         return 0
     M, N, K = 16, 16, 128
     device = torch.device("cuda")
@@ -997,8 +1022,7 @@ def _test_wmma_scale_fp8(mod, variant, bx16=False):
 def _test_wmma_scale_fp4(mod, variant, M, N, K, bx16=False):
     """Test WMMA scale fp4. Returns 0 on pass, 1 on fail."""
     arch = _get_gpu_arch()
-    if arch not in _WMMA_SCALE_ARCHS:
-        print(f"  SKIP: {variant} requires {_WMMA_SCALE_ARCHS}, got '{arch}'")
+    if _wmma_scale_unavailable(mod, variant, arch):
         return 0
     device = torch.device("cuda")
     torch.manual_seed(54321)
@@ -1035,8 +1059,7 @@ def _test_wmma_scale_fp4(mod, variant, M, N, K, bx16=False):
 def _test_tiled_wmma_scale_fp8(mod, variant):
     """Test tiled WMMA scale fp8 via make_tiled_mma (C = A @ B^T)."""
     arch = _get_gpu_arch()
-    if arch not in _WMMA_SCALE_ARCHS:
-        print(f"  SKIP: {variant} requires {_WMMA_SCALE_ARCHS}, got '{arch}'")
+    if _wmma_scale_unavailable(mod, variant, arch):
         return 0
     M, N, K = 16, 16, 128
     device = torch.device("cuda")
@@ -1092,8 +1115,7 @@ def test_tiled_wmma_scale_16x16x128_fp8(mod):
 def _test_tiled_wmma_scale_fp8_multi(mod, variant, M, N, K):
     """Test tiled WMMA scale fp8 with multiple waves (C = A @ B^T)."""
     arch = _get_gpu_arch()
-    if arch not in _WMMA_SCALE_ARCHS:
-        print(f"  SKIP: {variant} requires {_WMMA_SCALE_ARCHS}, got '{arch}'")
+    if _wmma_scale_unavailable(mod, variant, arch):
         return 0
     device = torch.device("cuda")
     fp8_dtype = _get_fp8_dtype()
@@ -1150,8 +1172,7 @@ def _pack_bx32_scales(exponents):
 def _test_wmma_scale_fp8_with_scaling(mod, variant, bx16=False):
     """Test WMMA scale fp8 with random per-row/col E8M0 scale values."""
     arch = _get_gpu_arch()
-    if arch not in _WMMA_SCALE_ARCHS:
-        print(f"  SKIP: {variant} requires {_WMMA_SCALE_ARCHS}, got '{arch}'")
+    if _wmma_scale_unavailable(mod, variant, arch):
         return 0
     M, N, K = 16, 16, 128
     device = torch.device("cuda")
@@ -1267,7 +1288,7 @@ def test_vector_add(mod):
 
 
 # Archs where the opus.hpp gfx12 (Navi 44/48 RDNA4) path is active. The kernel
-# body in test_opus_gmem_gfx1201.cu is gated by __gfx1201__ / __gfx1200__ —
+# body in test_opus_gmem_gfx1201.cu is gated by __gfx1201__ / __gfx1200__ --
 # on other archs the launcher runs an empty kernel, so we skip the correctness
 # check to avoid a misleading failure.
 _OPUS_PARSE_GFX1201_ARCHS = {"gfx1201", "gfx1200"}
@@ -1275,7 +1296,7 @@ _OPUS_PARSE_GFX1201_ARCHS = {"gfx1201", "gfx1200"}
 
 def test_opus_gmem_gfx1201(mod):
     """Verify opus.hpp parses + opus utilities (make_gmem / .load/.store /
-    cast) work on gfx1201. Mirrors the load → cast<float> → store pattern
+    cast) work on gfx1201. Mirrors the load -> cast<float> -> store pattern
     in sample_kernels.cu. Skips on other archs (kernel body is gfx1201-only)."""
     arch = _get_gpu_arch()
     if arch not in _OPUS_PARSE_GFX1201_ARCHS:
@@ -1311,7 +1332,7 @@ def test_opus_gmem_gfx1201(mod):
 
 # WMMA tests for gfx1200/gfx1201 (Navi 44/48, RDNA4). Both archs share the
 # same gfx12 wmma-128b ISA so the kernel bodies in test_wmma_gfx1201.cu are
-# gated by __gfx1201__ / __gfx1200__ — on other archs the launcher runs an
+# gated by __gfx1201__ / __gfx1200__ -- on other archs the launcher runs an
 # empty kernel so we skip the correctness check.
 _WMMA_GFX1201_ARCHS = {"gfx1201", "gfx1200"}
 
@@ -1627,6 +1648,68 @@ def test_async_load(mod):
         return 1
     print(f"  PASS: async_load (n={n}), bit-exact copy")
     return 0
+
+
+# Sentinel that the i_os kernel pre-fills into LDS; must match
+# ASYNC_LOAD_IOS_SENTINEL in test_async_load.cu.
+_ASYNC_LOAD_IOS_SENTINEL = -123456.0
+
+
+def _test_async_load_ioffset_one(mod, ios_bytes):
+    """Validate that a non-zero compile-time i_os shifts BOTH ends of the
+    async copy (source read AND LDS destination write), as documented in
+    opus.hpp gmem::_async_load.
+    """
+    if _skip_if_missing_symbol(
+        mod, "run_async_load_ioffset", f"async_load_ioffset(i_os={ios_bytes})"
+    ):
+        return 0
+
+    BLOCK_SIZE = 256
+    ios_elems = ios_bytes // 4  # float32
+    lds_size = BLOCK_SIZE + ios_elems
+    device = torch.device("cuda")
+
+    torch.manual_seed(99 + ios_bytes)
+    Src = torch.randn(lds_size, device=device, dtype=torch.float32)
+    Dst = torch.full((lds_size,), 7777.0, device=device, dtype=torch.float32)
+
+    mod.run_async_load_ioffset(Src, Dst, ios_bytes)
+
+    ref = Src.clone()
+    ref[:ios_elems] = _ASYNC_LOAD_IOS_SENTINEL
+
+    ok = torch.equal(Dst, ref)
+    if not ok:
+        # Diagnose which end failed for a clearer message.
+        sentinel_ok = torch.equal(
+            Dst[:ios_elems],
+            torch.full((ios_elems,), _ASYNC_LOAD_IOS_SENTINEL, device=device),
+        )
+        data_ok = torch.equal(Dst[ios_elems:], Src[ios_elems:])
+        reason = []
+        if not sentinel_ok:
+            reason.append("LDS dest not shifted (sentinel region clobbered)")
+        if not data_ok:
+            reason.append("source not shifted (data region mismatch)")
+        max_diff = (Dst - ref).abs().max().item()
+        print(
+            f"  FAIL: async_load_ioffset(i_os={ios_bytes}) max_diff={max_diff:.4e}; "
+            f"{'; '.join(reason) or 'unexpected mismatch'}"
+        )
+        return 1
+    print(f"  PASS: async_load_ioffset(i_os={ios_bytes}), both ends shifted")
+    return 0
+
+
+def test_async_load_ioffset(mod):
+    """i_os boundary values: 32 bytes (small) and 4092 bytes (= 1023 floats,
+    the dword-aligned max within the CDNA 12-bit OFFSET range [0,4095], valid
+    on every arch's per-arch static_assert)."""
+    rc = 0
+    rc += _test_async_load_ioffset_one(mod, 32)
+    rc += _test_async_load_ioffset_one(mod, 4092)
+    return rc
 
 
 def test_tr_load_f16(mod):
@@ -2150,7 +2233,7 @@ def test_predicated_copy_2d(mod):
     """Test 2D predicated load_if/store_if with multi-index predicate (i_row, i_col).
 
     Catches bugs where _if methods pass flat index instead of multi-index to predicates.
-    Uses a 2D layout with row/col boundary checking — the predicate receives (i_row, i_col)
+    Uses a 2D layout with row/col boundary checking -- the predicate receives (i_row, i_col)
     and uses them to check bounds, which would fail if given a single flat index.
     """
     if _skip_if_missing_symbol(mod, "run_predicated_copy_2d", "predicated_copy_2d"):
@@ -2562,6 +2645,40 @@ def test_wb_streamk_reduce(mod):
     return 0
 
 
+def test_tdm_feature_suite(mod):
+    """Functional coverage for opus::tdm on gfx1250: element sizes, tile ranks 2..5,
+    gather/scatter, runtime descriptor state, padding, multicast and clamping.
+
+    The checks are byte-exact against tile geometry and run on the C++ side, which owns
+    the buffers and prints a line per check; this returns the number that failed. Stating
+    the same expected layouts again in torch would give two descriptions of one geometry
+    that have to be kept in agreement, and the copy that drifted would be this one.
+    """
+    if _get_gpu_arch() not in {"gfx1250"}:
+        print("  SKIP: test_tdm_feature_suite (gfx1250 only)")
+        return 0
+    if _skip_if_missing_symbol(mod, "run_tdm_feature_suite", "test_tdm_feature_suite"):
+        return 0
+
+    import sys
+
+    sys.stdout.flush()
+    failures = mod.run_tdm_feature_suite()
+    # Negative means the suite declined to run because the device is not gfx1250. The
+    # arch gate above should already have caught that, so this is the second of two
+    # answers to the same question -- kept because they are established differently: this
+    # one from the device pass that was actually compiled, that one from a name torch
+    # reports.
+    if failures < 0:
+        print("  SKIP: test_tdm_feature_suite (device is not gfx1250)")
+        return 0
+    if failures:
+        print(f"  FAIL: tdm_feature_suite ({failures} checks failed)")
+        return 1
+    print("  PASS: tdm_feature_suite")
+    return 0
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -2639,6 +2756,7 @@ def main():
     failures += test_wmma_gfx1201_tiled_f32_f16(mod)
     failures += test_wmma_gfx1201_tiled_f32_bf16(mod)
     failures += test_async_load(mod)
+    failures += test_async_load_ioffset(mod)
     failures += test_tr_load_f16(mod)
     failures += test_dtype_convert_fp32_bf16(mod)
     failures += test_dtype_convert_fp32_fp16(mod)
@@ -2660,6 +2778,7 @@ def main():
     failures += test_mdiv(mod)
     failures += test_wb_cumulative(mod)
     failures += test_wb_streamk_reduce(mod)
+    failures += test_tdm_feature_suite(mod)
 
     if failures:
         print(f"\n{failures} test(s) FAILED")
