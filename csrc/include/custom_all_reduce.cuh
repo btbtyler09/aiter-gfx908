@@ -3807,9 +3807,20 @@ class CustomAllreduce
 
     // gfx908: the smem double-buffered "new" kernels corrupt peer reads
     // when captured into CUDA graphs and in eager launches after capture.
-    // Force the naive (vLLM-proven) kernels unconditionally so captures
-    // record the naive kernels, which replay bit-exact.
-    use_new = false;
+    // Force the naive (vLLM-proven) kernels on gfx908 so captures record
+    // the naive kernels, which replay bit-exact. Other archs keep the new
+    // kernels.
+    static const bool force_naive_gfx908 = []() {
+        hipDevice_t dev;
+        hipDeviceProp_t dev_prop;
+        hipGetDevice(&dev);
+        hipGetDeviceProperties(&dev_prop, dev);
+        return std::string(dev_prop.gcnArchName).find("gfx908") != std::string::npos;
+    }();
+    if(force_naive_gfx908)
+    {
+        use_new = false;
+    }
 
     // use new version of allreduce kernel
     if(use_new)

@@ -18,6 +18,7 @@
 #include "aiter_stream.h"
 #include "aiter_tensor.h"
 #include <cstring>
+#include <string>
 
 using fp8_type = opus::fp8_t;
 
@@ -84,9 +85,16 @@ static void _all_reduce(fptr_t _fa, void* inp, void* out,
     // even subsequent eager calls; naive kernels replay bit-exact 24/24 at
     // ws=2/4). The naive kernels (structural twins of vLLM's proven CAR)
     // are graph-safe. Force the naive path whenever the launch stream is
-    // capturing.
+    // capturing on gfx908 (other archs keep the new kernels).
+    static const bool on_gfx908 = []() {
+        hipDevice_t dev;
+        hipDeviceProp_t dev_prop;
+        hipGetDevice(&dev);
+        hipGetDeviceProperties(&dev_prop, dev);
+        return std::string(dev_prop.gcnArchName).find("gfx908") != std::string::npos;
+    }();
     hipStreamCaptureStatus cap_status;
-    if(hipStreamIsCapturing(stream, &cap_status) == hipSuccess
+    if(on_gfx908 && hipStreamIsCapturing(stream, &cap_status) == hipSuccess
        && cap_status == hipStreamCaptureStatusActive)
     {
         use_new = false;

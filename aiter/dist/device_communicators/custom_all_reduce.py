@@ -34,6 +34,16 @@ from aiter.utility.dtypes import fp8
 from .rocm_version import get_rocm_version
 
 
+def _on_gfx908() -> bool:
+    """True when the current device is gfx908 (MI100 / CDNA1)."""
+    try:
+        return "gfx908" in torch.cuda.get_device_properties(
+            torch.cuda.current_device()
+        ).gcnArchName
+    except Exception:
+        return False
+
+
 def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
 
@@ -1065,8 +1075,12 @@ class CustomAllreduce:
         # different sizes (deterministic own-current + peers-previous reads —
         # the serving corruption). hipDeviceMallocUncached forces peer reads
         # to memory. AITER_CAR_UNCACHED_POOL=0 re-enables the cached pool
-        # for A/B benchmarking only.
-        uncached_pool = os.environ.get("AITER_CAR_UNCACHED_POOL", "1") != "0"
+        # for A/B benchmarking only. Other archs keep the cached pool by
+        # default (their L2 stays coherent for peer reads).
+        uncached_default = "1" if _on_gfx908() else "0"
+        uncached_pool = (
+            os.environ.get("AITER_CAR_UNCACHED_POOL", uncached_default) != "0"
+        )
         self._pool.create("input", max_size, raw_cached=raw_cached and not uncached_pool,
                           uncached=uncached_pool)
 
@@ -1233,13 +1247,7 @@ class CustomAllreduce:
                 # into the graph; replays then read incoherent peer state
                 # (first decode token correct, every replayed token after
                 # corrupts). The pool path replays coherently.
-                from vllm.platforms.rocm import on_gfx908 as _on_gfx908
-
-                try:
-                    _gfx908 = _on_gfx908()
-                except Exception:
-                    _gfx908 = False
-                reg = self.enable_register_for_capturing and not _gfx908
+                reg = self.enable_register_for_capturing and not _on_gfx908()
                 return self.all_reduce(
                     input,
                     use_new=use_new,
