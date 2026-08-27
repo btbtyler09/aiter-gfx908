@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 
+import triton
 import triton.language as tl
+
 from aiter.ops.triton.utils._triton.kernel_repr import make_kernel_repr
 from aiter.ops.triton.utils._triton.pid_preprocessing import pid_grid, remap_xcd
 from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
-
-import triton
 
 _gemm_afp4wfp4_repr = make_kernel_repr(
     "_gemm_afp4wfp4_kernel",
@@ -720,6 +720,7 @@ def _get_config(
     N: int,
     K: int,
     shuffle: bool = False,
+    backend: str | None = None,
 ):
     # Note: Config files use K=2*K in their naming
     K = 2 * K
@@ -730,6 +731,7 @@ def _get_config(
             N,
             K,
             bounds=(4, 8, 16, 31, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192),
+            backend=backend,
         )
     else:
-        return get_gemm_config("GEMM-AFP4WFP4", M, N, K)
+        return get_gemm_config("GEMM-AFP4WFP4", M, N, K, backend=backend)

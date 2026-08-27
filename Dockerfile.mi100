@@ -9,7 +9,7 @@ ARG AITER_GIT_REPO=https://github.com/btbtyler09/aiter-gfx908.git
 ARG AITER_GIT_REF=mi100-optimized
 ARG AITER_FROM_GIT=0
 
-FROM btbtyler09/vllm-dev-mi100:2026.04.18
+FROM btbtyler09/vllm-dev-mi100:2026.04.19
 
 ARG AITER_GIT_REPO
 ARG AITER_GIT_REF
