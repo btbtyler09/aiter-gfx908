@@ -157,6 +157,24 @@ DINLINE O downcast(V val)
 // reduce kernel. Thus, it doesn't need to make any visibility guarantees for
 // prior memory accesses. Note: volatile writes will not be reordered against
 // other volatile writes.
+// gfx908 / ROCm: these flags guard data written by REMOTE agents (peer GPUs
+// staging into the IPC input pool across XGMI). A __MEMORY_SCOPE_DEVICE
+// acquire does not order a remote agent's writes, so the acquire scope must
+// be SYSTEM to match the SYSTEM-scope release on the producing side.
+// The uncached input pool (AITER_CAR_UNCACHED_POOL, default on for gfx908)
+// already removes the stale-L2 mechanism; this closes the ordering gap.
+// Build with -DAITER_CAR_PEER_ACQUIRE_SCOPE_DEVICE=1 to restore the previous
+// scope for an A/B cost measurement.
+#ifndef AITER_CAR_PEER_ACQUIRE_SCOPE_DEVICE
+#define AITER_CAR_PEER_ACQUIRE_SCOPE_DEVICE 0
+#endif
+
+#if AITER_CAR_PEER_ACQUIRE_SCOPE_DEVICE
+#define AITER_CAR_PEER_ACQUIRE_SCOPE __MEMORY_SCOPE_DEVICE
+#else
+#define AITER_CAR_PEER_ACQUIRE_SCOPE __MEMORY_SCOPE_SYSTEM
+#endif
+
 template <int ngpus>
 DINLINE void start_sync(const RankSignals& sg,
 #ifndef USE_ROCM
@@ -188,12 +206,12 @@ DINLINE void start_sync(const RankSignals& sg,
         if(seq)
             while(__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
                                          __ATOMIC_ACQUIRE,
-                                         __MEMORY_SCOPE_DEVICE) != flag)
+                                         AITER_CAR_PEER_ACQUIRE_SCOPE) != flag)
                 ;
         else
             while(__scoped_atomic_load_n(&self_sg->start[blockIdx.x][threadIdx.x],
                                          __ATOMIC_ACQUIRE,
-                                         __MEMORY_SCOPE_DEVICE) < flag)
+                                         AITER_CAR_PEER_ACQUIRE_SCOPE) < flag)
                 ;
     }
     __syncthreads();
@@ -247,12 +265,12 @@ DINLINE void end_sync(const RankSignals& sg,
         if(seq)
             while(__scoped_atomic_load_n(&self_sg->end[blockIdx.x][threadIdx.x],
                                          final_sync ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
-                                         __MEMORY_SCOPE_DEVICE) != flag)
+                                         AITER_CAR_PEER_ACQUIRE_SCOPE) != flag)
                 ;
         else
             while(__scoped_atomic_load_n(&self_sg->end[blockIdx.x][threadIdx.x],
                                          final_sync ? __ATOMIC_RELAXED : __ATOMIC_ACQUIRE,
-                                         __MEMORY_SCOPE_DEVICE) < flag)
+                                         AITER_CAR_PEER_ACQUIRE_SCOPE) < flag)
                 ;
     }
     __syncthreads();
